@@ -1,0 +1,14 @@
+.{
+    .name = "bibl",
+    .version = "0.0.0",
+    .dependencies = .{
+        .clippy = .{
+            .path = "../clippy",
+        }
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
