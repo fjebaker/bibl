@@ -126,12 +126,17 @@ pub fn main() !void {
     var map = try parseMetadataMap(allocator, file.ptr[index..]);
     defer map.deinit();
 
-    var map_itt = map.iterator();
+    var buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
+    var writer = buffered.writer();
 
-    const writer = std.io.getStdOut().writer();
-    while (map_itt.next()) |item| {
-        try writer.print("{s}: {s}\n", .{ item.key_ptr.*, item.value_ptr.* });
-    }
+    try writer.writeAll(map.get("Title") orelse "");
+    try writer.writeAll("\n");
+    try writer.writeAll(map.get("Author") orelse "");
+    try writer.writeAll("\n");
+    try writer.writeAll(map.get("Keywords") orelse "");
+    try writer.writeAll("\n");
+
+    try buffered.flush();
 
     // let the OS cleanup for us
     std.process.cleanExit();
