@@ -6,6 +6,10 @@
             .url = "https://github.com/fjebaker/clippy/archive/main.tar.gz",
             .hash = "12206aaa8fc6933b9a551af306630b0a39a1efc912b5bd87f18c52dca9b21ec5a091",
         },
+        .farbe = .{
+            .url = "https://github.com/fjebaker/farbe/archive/main.tar.gz",
+            .hash = "1220afe0eee9d0382f7ff07905205e287a8714bb40fa2642f8b1103509ac3503d93d",
+        },
     },
     .paths = .{
         "build.zig",

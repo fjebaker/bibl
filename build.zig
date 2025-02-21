@@ -5,6 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const dep_clippy = b.dependency("clippy", .{ .target = target, .optimize = optimize });
+    const dep_farbe = b.dependency("farbe", .{ .target = target, .optimize = optimize });
 
     const exe = b.addExecutable(.{
         .name = "bibl",
@@ -13,6 +14,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
     });
     exe.root_module.addImport("clippy", dep_clippy.module("clippy"));
+    exe.root_module.addImport("farbe", dep_farbe.module("farbe"));
 
     b.installArtifact(exe);
 
