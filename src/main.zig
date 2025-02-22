@@ -2,8 +2,8 @@ const std = @import("std");
 const farbe = @import("farbe");
 const clippy = @import("clippy").ClippyInterface(.{});
 
-const HIGHLIGHT_COLOR = farbe.Farbe.init().fgRgb(193, 156, 0);
-const AUTHOR_COLOR = farbe.Farbe.init().fgRgb(58, 150, 221);
+const AUTHOR_COLOR = farbe.Farbe.init().fgRgb(193, 156, 0);
+const HIGHLIGHT_COLOR = farbe.Farbe.init().fgRgb(58, 150, 221);
 
 const Commands = clippy.Commands(.{
     .commands = &.{
@@ -15,6 +15,13 @@ const Commands = clippy.Commands(.{
                     .arg = "path",
                     .help = "Path to the PDF file to read the metadata from",
                     .required = true,
+                },
+                .{
+                    .arg = "--raw",
+                    .help =
+                    \\Do not do any string manipulation, print extracted
+                    \\information in standard plaintext.
+                    ,
                 },
             },
         },
@@ -229,24 +236,36 @@ pub fn main() !void {
             var buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
             var writer = buffered.writer();
 
-            for (0.., paper.authors) |i, auth| {
-                try AUTHOR_COLOR.write(writer, "{s}", .{auth});
-                if (i != paper.authors.len - 1) {
-                    try writer.writeAll(", ");
+            if (args.raw) {
+                try writer.writeAll(paper.info_map.get("Title") orelse "");
+                try writer.writeAll("\n");
+                try writer.writeAll(paper.info_map.get("Author") orelse "");
+                try writer.writeAll("\n");
+                try writer.writeAll(paper.info_map.get("Keywords") orelse "");
+                try writer.writeAll("\n");
+            } else {
+                for (0.., paper.authors) |i, auth| {
+                    try AUTHOR_COLOR.write(writer, "{s}", .{auth});
+                    if (i != paper.authors.len - 1) {
+                        try writer.writeAll(", ");
+                    }
                 }
-            }
-            try writer.print(" {d}", .{paper.year});
-            try writer.writeAll("\n");
+                try writer.print(" {d}", .{paper.year});
+                try writer.writeAll("\n");
 
-            try writer.writeAll("Title   : ");
-            try HIGHLIGHT_COLOR.write(writer, "{s}", .{paper.title});
-            try writer.writeAll("\n");
+                try writer.writeAll("Title   : ");
+                try writer.writeAll(paper.title);
+                try writer.writeAll("\n");
 
-            try writer.writeAll("Tags    : ");
-            for (paper.tags) |tag| {
-                try AUTHOR_COLOR.write(writer, "{s}", .{tag});
+                try writer.writeAll("Tags    : ");
+                for (0.., paper.tags) |i, tag| {
+                    try AUTHOR_COLOR.write(writer, "{s}", .{tag});
+                    if (i != paper.tags.len - 1) {
+                        try writer.writeAll(" ");
+                    }
+                }
+                try writer.writeAll("\n");
             }
-            try writer.writeAll("\n");
 
             try buffered.flush();
         },
