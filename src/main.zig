@@ -302,9 +302,7 @@ fn tagColour(tag: []const u8) farbe.Farbe {
     );
 }
 
-fn printInfo(state: *State, dir: std.fs.Dir, writer: anytype, path: []const u8, raw: bool) !void {
-    const paper = try state.library.loadParsePaper(dir, path);
-
+fn printPaperInfo(writer: anytype, paper: Paper, raw: bool) !void {
     if (raw) {
         try writer.writeAll(paper.title);
         try writer.writeAll("\n");
@@ -359,19 +357,21 @@ fn listFiles(state: *State, writer: anytype, args: ListArguments.Parsed) !void {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var file_paths = std.ArrayList([]const u8).init(alloc);
+    var file_paths = std.ArrayList(Paper).init(alloc);
 
     while (try walker.next()) |item| {
         switch (item.kind) {
             .file => {
-                try file_paths.append(try alloc.dupe(u8, item.path));
+                try file_paths.append(
+                    try state.library.loadParsePaper(state.dir, item.path),
+                );
             },
             else => {},
         }
     }
 
-    for (file_paths.items) |path| {
-        try printInfo(state, state.dir, writer, path, false);
+    for (file_paths.items) |paper| {
+        try printPaperInfo(writer, paper, false);
         try writer.writeAll("\n");
     }
 }
@@ -407,10 +407,13 @@ pub fn main() !void {
     switch (command) {
         .info => |args| {
             const dir = std.fs.cwd();
-            try printInfo(state, dir, writer, args.path, args.raw);
+            const p1 = try state.library.loadParsePaper(dir, args.path);
+
+            try printPaperInfo(writer, p1, args.raw);
             try writer.writeAll("\n");
             for (overflow.items) |path| {
-                try printInfo(state, dir, writer, path, args.raw);
+                const paper = try state.library.loadParsePaper(dir, path);
+                try printPaperInfo(writer, paper, args.raw);
                 try writer.writeAll("\n");
             }
         },
