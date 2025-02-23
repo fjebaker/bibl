@@ -6,61 +6,6 @@ const AUTHOR_COLOR = farbe.Farbe.init().fgRgb(193, 156, 0);
 const HIGHLIGHT_COLOR = farbe.Farbe.init().fgRgb(58, 150, 221);
 const ERROR_COLOR = farbe.Farbe.init().fgRgb(255, 0, 0);
 
-/// Caller owns the memory
-fn getRootDir(allocator: std.mem.Allocator) ![]const u8 {
-    return try std.process.getEnvVarOwned(allocator, "BIBL_LIBRARY");
-}
-
-pub const State = struct {
-    allocator: std.mem.Allocator,
-    root_path: []const u8,
-    root_dir: std.fs.Dir,
-    overflow_args: []const []const u8,
-    library: Library,
-
-    pub fn init(allocator: std.mem.Allocator, overflow_args: []const []const u8) !*State {
-        const root_path = try getRootDir(allocator);
-        errdefer allocator.free(root_path);
-
-        const ptr = try allocator.create(State);
-        errdefer allocator.destroy(ptr);
-
-        ptr.* = .{
-            .allocator = allocator,
-            .root_path = root_path,
-            .root_dir = try std.fs.cwd().openDir(root_path, .{ .iterate = true }),
-            .overflow_args = overflow_args,
-            .library = Library.init(allocator),
-        };
-        return ptr;
-    }
-
-    pub fn deinit(self: *State) void {
-        self.allocator.free(self.root_path);
-        self.root_dir.close();
-        self.library.deinit();
-        self.allocator.destroy(self);
-    }
-};
-
-fn writeError(err: anyerror, comptime fmt: []const u8, args: anytype) !void {
-    const stderr = std.io.getStdErr();
-    const color = stderr.isTty();
-
-    const writer = stderr.writer();
-
-    if (color) try ERROR_COLOR.writeOpen(writer);
-    try writer.print("Error {any}", .{err});
-    if (color) try ERROR_COLOR.writeClose(writer);
-
-    try writer.writeAll(": ");
-    try writer.print(fmt, args);
-    try writer.writeAll("\n");
-
-    std.process.cleanExit();
-    return err;
-}
-
 pub const clippy_options: clippy.Options = .{
     .errorFn = writeError,
 };
@@ -83,9 +28,67 @@ const InfoArguments = clippy.Arguments(
     },
 );
 
+const ListArguments = clippy.Arguments(&.{});
+
 const Commands = clippy.Commands(union(enum) {
     info: InfoArguments,
+    list: ListArguments,
 });
+
+/// Caller owns the memory
+fn getRootDir(allocator: std.mem.Allocator) ![]const u8 {
+    return try std.process.getEnvVarOwned(allocator, "BIBL_LIBRARY");
+}
+
+pub const State = struct {
+    allocator: std.mem.Allocator,
+    root_path: []const u8,
+    dir: std.fs.Dir,
+    overflow_args: []const []const u8,
+    library: Library,
+
+    pub fn init(allocator: std.mem.Allocator, overflow_args: []const []const u8) !*State {
+        const root_path = try getRootDir(allocator);
+        errdefer allocator.free(root_path);
+
+        const ptr = try allocator.create(State);
+        errdefer allocator.destroy(ptr);
+
+        ptr.* = .{
+            .allocator = allocator,
+            .root_path = root_path,
+            .dir = try std.fs.cwd().openDir(root_path, .{ .iterate = true }),
+            .overflow_args = overflow_args,
+            .library = Library.init(allocator),
+        };
+        return ptr;
+    }
+
+    pub fn deinit(self: *State) void {
+        self.allocator.free(self.root_path);
+        self.dir.close();
+        self.library.deinit();
+        self.allocator.destroy(self);
+    }
+};
+
+fn writeError(err: anyerror, comptime fmt: []const u8, args: anytype) !void {
+    const stderr = std.io.getStdErr();
+    const color = stderr.isTty();
+
+    const writer = stderr.writer();
+
+    if (color) try ERROR_COLOR.writeOpen(writer);
+    try writer.print("Error {any}", .{err});
+    if (color) try ERROR_COLOR.writeClose(writer);
+
+    try writer.writeAll(": ");
+    try writer.print(fmt, args);
+    try writer.writeAll("\n");
+
+    std.process.cleanExit();
+    return err;
+}
 
 const MemoryMappedFile = struct {
     file: std.fs.File,
@@ -167,8 +170,8 @@ fn parseMetadataMap(allocator: std.mem.Allocator, contents: []const u8) !StringM
     return map;
 }
 
-pub fn mmap(filename: []const u8) !MemoryMappedFile {
-    const file = try std.fs.cwd().openFile(filename, .{});
+pub fn mmap(dir: std.fs.Dir, filename: []const u8) !MemoryMappedFile {
+    const file = try dir.openFile(filename, .{});
     errdefer file.close();
     const stat = try file.stat();
 
@@ -278,13 +281,13 @@ fn tagColour(tag: []const u8) farbe.Farbe {
     );
 }
 
-fn printInfo(state: *State, writer: anytype, path: []const u8, args: InfoArguments.Parsed) !void {
-    const file = try mmap(path);
+fn printInfo(state: *State, dir: std.fs.Dir, writer: anytype, path: []const u8, raw: bool) !void {
+    const file = try mmap(dir, path);
     defer file.deinit();
 
     const paper = try state.library.parsePaper(file.ptr);
 
-    if (args.raw) {
+    if (raw) {
         try writer.writeAll(paper.info_map.get("Title") orelse "");
         try writer.writeAll("\n");
         try writer.writeAll(paper.info_map.get("Author") orelse "");
@@ -342,20 +345,37 @@ pub fn main() !void {
     var state = try State.init(allocator, overflow.items);
     defer state.deinit();
 
+    var buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
+    const writer = buffered.writer();
+
     switch (command) {
         .info => |args| {
-            var buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
-            const writer = buffered.writer();
-
-            try printInfo(state, writer, args.path, args);
+            const dir = std.fs.cwd();
+            try printInfo(state, dir, writer, args.path, args.raw);
+            try writer.writeAll("\n");
             for (overflow.items) |path| {
+                try printInfo(state, dir, writer, path, args.raw);
                 try writer.writeAll("\n");
-                try printInfo(state, writer, path, args);
             }
+        },
+        .list => |args| {
+            _ = args;
+            var walker = try state.dir.walk(state.allocator);
+            defer walker.deinit();
 
-            try buffered.flush();
+            while (try walker.next()) |item| {
+                switch (item.kind) {
+                    .file => {
+                        try printInfo(state, state.dir, writer, item.path, false);
+                        try writer.writeAll("\n");
+                    },
+                    else => {},
+                }
+            }
         },
     }
+
+    try buffered.flush();
 
     // let the OS cleanup for us
     std.process.cleanExit();
