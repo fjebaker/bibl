@@ -3,6 +3,8 @@ const farbe = @import("farbe");
 const clippy = @import("clippy");
 const datetime = @import("datetime");
 
+const find = @import("find.zig");
+
 const AUTHOR_COLOR = farbe.Farbe.init().fgRgb(193, 156, 0);
 const HIGHLIGHT_COLOR = farbe.Farbe.init().fgRgb(58, 150, 221);
 const ERROR_COLOR = farbe.Farbe.init().fgRgb(255, 0, 0);
@@ -419,7 +421,12 @@ fn findInFiles(
     writer: anytype,
     args: FindArguments.Parsed,
 ) !void {
-    _ = state;
+    try state.loadLibrary();
+    const outcome = try find.searchPrompt(
+        state.allocator,
+        state.library.papers.items,
+    );
+    std.debug.print(">> {any}\n", .{outcome});
     _ = writer;
     _ = args;
 }

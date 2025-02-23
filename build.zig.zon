@@ -14,6 +14,15 @@
             .url = "https://github.com/frmdstryr/zig-datetime/archive/master.tar.gz",
             .hash = "122077215ce36e125a490e59ec1748ffd4f6ba00d4d14f7308978e5360711d72d77f",
         },
+        .fuzzig = .{
+            .url = "https://github.com/fjebaker/fuzzig/archive/main.tar.gz",
+            .hash = "1220666c7afe30f6a51ae477f7755e9b6a5341723bfcb5de349817b5d0912b96f9ad",
+        },
+        .termui = .{
+            .path = "../termui",
+            // .url = "https://github.com/fjebaker/termui/archive/main.tar.gz",
+            // .hash = "1220b6f7c21af9998c2df5b3b0fa5e03f47ff28260d1eb656a3742d0ad82361c59db",
+        },
     },
     .paths = .{
         "build.zig",
