@@ -193,11 +193,14 @@ pub const Paper = struct {
     title: []const u8 = "",
     tags: []const []const u8 = &.{},
 
-    allocator: std.mem.Allocator,
-    info_map: StringMap,
+    created: u64,
+    modified: u64,
 
-    fn parseInfo(self: *Paper) !void {
-        if (self.info_map.get("Author")) |author_field| {
+    allocator: std.mem.Allocator,
+
+    fn parseInfo(self: *Paper, info_map: StringMap) !void {
+        if (info_map.get("Author")) |f| {
+            const author_field = try self.allocator.dupe(u8, f);
             const split = std.mem.indexOfScalar(u8, author_field, ' ') orelse author_field.len;
 
             const author_string = author_field[0..split];
@@ -222,8 +225,12 @@ pub const Paper = struct {
             }
         }
 
-        if (self.info_map.get("Title")) |title| self.title = title;
-        if (self.info_map.get("Keywords")) |keywords| {
+        if (info_map.get("Title")) |f| {
+            const title = try self.allocator.dupe(u8, f);
+            self.title = title;
+        }
+        if (info_map.get("Keywords")) |f| {
+            const keywords = try self.allocator.dupe(u8, f);
             var tags = try self.allocator.alloc(
                 []const u8,
                 std.mem.count(u8, keywords, " ") + 1,
@@ -258,16 +265,30 @@ pub const Library = struct {
         self.* = undefined;
     }
 
-    pub fn parsePaper(self: *Library, contents: []const u8) !Paper {
+    /// Loads, parsers, copies relevant information, and closes the file again
+    /// so that no dangling fd is open.
+    pub fn loadParsePaper(self: *Library, dir: std.fs.Dir, path: []const u8) !Paper {
+        const file = try mmap(dir, path);
+        defer file.deinit();
+
+        const stat = try file.file.stat();
+        return try self.parsePaper(file.ptr, stat);
+    }
+
+    fn parsePaper(self: *Library, contents: []const u8, stat: std.fs.File.Stat) !Paper {
         const allocator = self.arena.allocator();
         const index = try findMetadataIndex(allocator, contents);
 
         var map = try parseMetadataMap(allocator, contents[index..]);
-        errdefer map.deinit();
+        defer map.deinit();
 
-        var paper: Paper = .{ .allocator = allocator, .info_map = map };
-        try paper.parseInfo();
+        var paper: Paper = .{
+            .allocator = allocator,
+            .modified = @intCast(@mod(stat.mtime, 1000)),
+            .created = @intCast(@mod(stat.ctime, 1000)),
+        };
 
+        try paper.parseInfo(map);
         return paper;
     }
 };
@@ -282,18 +303,27 @@ fn tagColour(tag: []const u8) farbe.Farbe {
 }
 
 fn printInfo(state: *State, dir: std.fs.Dir, writer: anytype, path: []const u8, raw: bool) !void {
-    const file = try mmap(dir, path);
-    defer file.deinit();
-
-    const paper = try state.library.parsePaper(file.ptr);
+    const paper = try state.library.loadParsePaper(dir, path);
 
     if (raw) {
-        try writer.writeAll(paper.info_map.get("Title") orelse "");
+        try writer.writeAll(paper.title);
         try writer.writeAll("\n");
-        try writer.writeAll(paper.info_map.get("Author") orelse "");
+
+        for (0.., paper.authors) |i, auth| {
+            try writer.writeAll(auth);
+            if (i != paper.authors.len - 1) {
+                try writer.writeAll("+");
+            }
+        }
+        try writer.print(" {d}", .{paper.year});
         try writer.writeAll("\n");
-        try writer.writeAll(paper.info_map.get("Keywords") orelse "");
-        try writer.writeAll("\n");
+
+        for (0.., paper.tags) |i, tag| {
+            try writer.writeAll(tag);
+            if (i != paper.authors.len - 1) {
+                try writer.writeAll(" ");
+            }
+        }
     } else {
         for (0.., paper.authors) |i, auth| {
             try AUTHOR_COLOR.write(writer, "{s}", .{auth});
