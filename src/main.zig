@@ -1,10 +1,17 @@
 const std = @import("std");
 const farbe = @import("farbe");
 const clippy = @import("clippy");
+const datetime = @import("datetime");
 
 const AUTHOR_COLOR = farbe.Farbe.init().fgRgb(193, 156, 0);
 const HIGHLIGHT_COLOR = farbe.Farbe.init().fgRgb(58, 150, 221);
 const ERROR_COLOR = farbe.Farbe.init().fgRgb(255, 0, 0);
+
+const USAGE =
+    \\bibl: a command line bibliography and library manager
+;
+
+const BiblError = error{ NoTrailer, NoMetadataFound, NoAuthors };
 
 pub const clippy_options: clippy.Options = .{
     .errorFn = writeError,
@@ -28,12 +35,35 @@ const InfoArguments = clippy.Arguments(
     },
 );
 
-const ListArguments = clippy.Arguments(&.{});
+const ListArguments = clippy.Arguments(&.{
+    .{
+        .arg = "--sort how",
+        .help = "How to sort the listed items.",
+    },
+    .{
+        .arg = "-r/--reverse",
+        .help = "Reverse the order.",
+    },
+});
+
+const HelpArguments = clippy.Arguments(&.{
+    .{ .arg = "--help", .help = "Print help message" },
+});
+
+const FindArguments = clippy.Arguments(&.{});
 
 const Commands = clippy.Commands(union(enum) {
     info: InfoArguments,
     list: ListArguments,
+    find: FindArguments,
 });
+
+const SortStrategy = enum {
+    author,
+    title,
+    created,
+    modified,
+};
 
 /// Caller owns the memory
 fn getRootDir(allocator: std.mem.Allocator) ![]const u8 {
@@ -70,6 +100,28 @@ pub const State = struct {
         self.library.deinit();
         self.allocator.destroy(self);
     }
+
+    pub fn loadLibrary(self: *State) !void {
+        var walker = try self.dir.walk(self.allocator);
+        defer walker.deinit();
+
+        while (try walker.next()) |item| {
+            switch (item.kind) {
+                .file => {
+                    _ = self.library.loadParsePaper(self.dir, item.path) catch |err| {
+                        switch (err) {
+                            BiblError.NoAuthors,
+                            BiblError.NoMetadataFound,
+                            BiblError.NoTrailer,
+                            => continue,
+                            else => return err,
+                        }
+                    };
+                },
+                else => {},
+            }
+        }
+    }
 };
 
 fn writeError(err: anyerror, comptime fmt: []const u8, args: anytype) !void {
@@ -79,7 +131,7 @@ fn writeError(err: anyerror, comptime fmt: []const u8, args: anytype) !void {
     const writer = stderr.writer();
 
     if (color) try ERROR_COLOR.writeOpen(writer);
-    try writer.print("Error {any}", .{err});
+    try writer.print("BiblError {any}", .{err});
     if (color) try ERROR_COLOR.writeClose(writer);
 
     try writer.writeAll(": ");
@@ -99,8 +151,6 @@ const MemoryMappedFile = struct {
         self.file.close();
     }
 };
-
-const Error = error{ NoTrailer, NoMetadataFound };
 
 fn findMetadataIndex(allocator: std.mem.Allocator, file: []const u8) !usize {
     // now we want to read the Info section
@@ -131,7 +181,7 @@ fn findMetadataIndex(allocator: std.mem.Allocator, file: []const u8) !usize {
         }
     }
 
-    return Error.NoMetadataFound;
+    return BiblError.NoMetadataFound;
 }
 
 const StringMap = std.StringHashMap([]const u8);
@@ -284,11 +334,14 @@ pub const Library = struct {
 
         var paper: Paper = .{
             .allocator = allocator,
-            .modified = @intCast(@mod(stat.mtime, 1000)),
-            .created = @intCast(@mod(stat.ctime, 1000)),
+            .modified = @intCast(@divFloor(@abs(stat.atime), std.time.ns_per_ms)),
+            .created = @intCast(@divFloor(@abs(stat.ctime), std.time.ns_per_ms)),
         };
 
         try paper.parseInfo(map);
+        if (paper.authors.len == 0) return BiblError.NoAuthors;
+
+        try self.papers.append(paper);
         return paper;
     }
 };
@@ -345,32 +398,58 @@ fn printPaperInfo(writer: anytype, paper: Paper, raw: bool) !void {
             }
         }
         try writer.writeAll("\n");
+
+        const created = datetime.datetime.Datetime.fromTimestamp(@intCast(paper.created));
+        const modified = datetime.datetime.Datetime.fromTimestamp(@intCast(paper.modified));
+        try writer.print("Created : {d: >4}-{d:0>2}-{d:0>2} (Modified: {d: >4}-{d:0>2}-{d:0>2})", .{
+            created.date.year,
+            created.date.month,
+            created.date.day,
+
+            modified.date.year,
+            modified.date.month,
+            modified.date.day,
+        });
+        try writer.writeAll("\n");
     }
 }
 
-fn listFiles(state: *State, writer: anytype, args: ListArguments.Parsed) !void {
+fn findInFiles(
+    state: *State,
+    writer: anytype,
+    args: FindArguments.Parsed,
+) !void {
+    _ = state;
+    _ = writer;
     _ = args;
-    var walker = try state.dir.walk(state.allocator);
-    defer walker.deinit();
+}
 
-    var arena = std.heap.ArenaAllocator.init(state.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+fn listFiles(
+    state: *State,
+    writer: anytype,
+    args: ListArguments.Parsed,
+    sort: SortStrategy,
+) !void {
+    try state.loadLibrary();
 
-    var file_paths = std.ArrayList(Paper).init(alloc);
-
-    while (try walker.next()) |item| {
-        switch (item.kind) {
-            .file => {
-                try file_paths.append(
-                    try state.library.loadParsePaper(state.dir, item.path),
-                );
-            },
-            else => {},
+    const Ctx = struct {
+        how: SortStrategy,
+        reverse: bool,
+        fn lessThan(self: *@This(), lhs: Paper, rhs: Paper) bool {
+            const b = switch (self.how) {
+                .author => std.ascii.lessThanIgnoreCase(lhs.authors[0], rhs.authors[0]),
+                .title => std.ascii.lessThanIgnoreCase(lhs.title, rhs.title),
+                .created => lhs.created < rhs.created,
+                .modified => lhs.modified < rhs.modified,
+            };
+            return if (self.reverse) !b else b;
         }
-    }
+    };
 
-    for (file_paths.items) |paper| {
+    var ctx: Ctx = .{ .how = sort, .reverse = args.reverse };
+    std.sort.heap(Paper, state.library.papers.items, &ctx, Ctx.lessThan);
+
+    for (state.library.papers.items) |paper| {
         try printPaperInfo(writer, paper, false);
         try writer.writeAll("\n");
     }
@@ -395,33 +474,57 @@ pub fn main() !void {
     };
 
     var itt = clippy.ArgumentIterator.init(raw_args[1..]);
-    var parser = Commands.init(&itt, .{});
-    const command = try parser.parseAllCtx(&overflow, .{ .unhandled_arg = Ctx.handleArg });
+    var help_itt = itt;
 
-    var state = try State.init(allocator, overflow.items);
-    defer state.deinit();
+    // first we parse to see if help was given
+    const help_parsed = try HelpArguments.initParseAll(&help_itt, .{ .forgiving = true });
 
     var buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
     const writer = buffered.writer();
 
-    switch (command) {
-        .info => |args| {
-            const dir = std.fs.cwd();
-            const p1 = try state.library.loadParsePaper(dir, args.path);
+    if (help_parsed.help) {
+        try writer.writeAll(USAGE);
+        try writer.writeAll("\n\n");
+        try Commands.writeHelp(writer, .{});
+    } else {
+        var parser = Commands.init(&itt, .{});
+        const command = try parser.parseAllCtx(&overflow, .{ .unhandled_arg = Ctx.handleArg });
 
-            try printPaperInfo(writer, p1, args.raw);
-            try writer.writeAll("\n");
-            for (overflow.items) |path| {
-                const paper = try state.library.loadParsePaper(dir, path);
-                try printPaperInfo(writer, paper, args.raw);
+        var state = try State.init(allocator, overflow.items);
+        defer state.deinit();
+
+        switch (command) {
+            .info => |args| {
+                const dir = std.fs.cwd();
+                const p1 = try state.library.loadParsePaper(dir, args.path);
+
+                try printPaperInfo(writer, p1, args.raw);
                 try writer.writeAll("\n");
-            }
-        },
-        .list => |args| {
-            try listFiles(state, writer, args);
-        },
+                for (overflow.items) |path| {
+                    const paper = try state.library.loadParsePaper(dir, path);
+                    try printPaperInfo(writer, paper, args.raw);
+                    try writer.writeAll("\n");
+                }
+            },
+            .list => |args| {
+                const sort = std.meta.stringToEnum(
+                    SortStrategy,
+                    args.sort orelse "author",
+                ) orelse {
+                    try parser.throwError(
+                        clippy.ParseError.InvalidFlag,
+                        "Failed to parse sort strategy: '{s}'",
+                        .{args.sort.?},
+                    );
+                    unreachable;
+                };
+                try listFiles(state, writer, args, sort);
+            },
+            .find => |args| {
+                try findInFiles(state, writer, args);
+            },
+        }
     }
-
     try buffered.flush();
 
     // let the OS cleanup for us

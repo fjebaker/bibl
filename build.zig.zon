@@ -10,6 +10,10 @@
             .url = "https://github.com/fjebaker/farbe/archive/main.tar.gz",
             .hash = "1220afe0eee9d0382f7ff07905205e287a8714bb40fa2642f8b1103509ac3503d93d",
         },
+        .datetime = .{
+            .url = "https://github.com/frmdstryr/zig-datetime/archive/master.tar.gz",
+            .hash = "122077215ce36e125a490e59ec1748ffd4f6ba00d4d14f7308978e5360711d72d77f",
+        },
     },
     .paths = .{
         "build.zig",

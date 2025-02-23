@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
 
     const dep_clippy = b.dependency("clippy", .{ .target = target, .optimize = optimize });
     const dep_farbe = b.dependency("farbe", .{ .target = target, .optimize = optimize });
+    const dep_datetime = b.dependency("datetime", .{ .target = target, .optimize = optimize });
 
     const exe = b.addExecutable(.{
         .name = "bibl",
@@ -15,6 +16,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("clippy", dep_clippy.module("clippy"));
     exe.root_module.addImport("farbe", dep_farbe.module("farbe"));
+    exe.root_module.addImport("datetime", dep_datetime.module("zig-datetime"));
 
     b.installArtifact(exe);
 
