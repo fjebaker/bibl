@@ -6,6 +6,43 @@ const AUTHOR_COLOR = farbe.Farbe.init().fgRgb(193, 156, 0);
 const HIGHLIGHT_COLOR = farbe.Farbe.init().fgRgb(58, 150, 221);
 const ERROR_COLOR = farbe.Farbe.init().fgRgb(255, 0, 0);
 
+/// Caller owns the memory
+fn getRootDir(allocator: std.mem.Allocator) ![]const u8 {
+    return try std.process.getEnvVarOwned(allocator, "BIBL_LIBRARY");
+}
+
+pub const State = struct {
+    allocator: std.mem.Allocator,
+    root_path: []const u8,
+    root_dir: std.fs.Dir,
+    overflow_args: []const []const u8,
+    library: Library,
+
+    pub fn init(allocator: std.mem.Allocator, overflow_args: []const []const u8) !*State {
+        const root_path = try getRootDir(allocator);
+        errdefer allocator.free(root_path);
+
+        const ptr = try allocator.create(State);
+        errdefer allocator.destroy(ptr);
+
+        ptr.* = .{
+            .allocator = allocator,
+            .root_path = root_path,
+            .root_dir = try std.fs.cwd().openDir(root_path, .{ .iterate = true }),
+            .overflow_args = overflow_args,
+            .library = Library.init(allocator),
+        };
+        return ptr;
+    }
+
+    pub fn deinit(self: *State) void {
+        self.allocator.free(self.root_path);
+        self.root_dir.close();
+        self.library.deinit();
+        self.allocator.destroy(self);
+    }
+};
+
 fn writeError(err: anyerror, comptime fmt: []const u8, args: anytype) !void {
     const stderr = std.io.getStdErr();
     const color = stderr.isTty();
@@ -241,11 +278,11 @@ fn tagColour(tag: []const u8) farbe.Farbe {
     );
 }
 
-fn printInfo(writer: anytype, library: *Library, path: []const u8, args: InfoArguments.Parsed) !void {
+fn printInfo(state: *State, writer: anytype, path: []const u8, args: InfoArguments.Parsed) !void {
     const file = try mmap(path);
     defer file.deinit();
 
-    const paper = try library.parsePaper(file.ptr);
+    const paper = try state.library.parsePaper(file.ptr);
 
     if (args.raw) {
         try writer.writeAll(paper.info_map.get("Title") orelse "");
@@ -302,18 +339,18 @@ pub fn main() !void {
     var parser = Commands.init(&itt, .{});
     const command = try parser.parseAllCtx(&overflow, .{ .unhandled_arg = Ctx.handleArg });
 
-    var library = Library.init(allocator);
-    defer library.deinit();
+    var state = try State.init(allocator, overflow.items);
+    defer state.deinit();
 
     switch (command) {
         .info => |args| {
             var buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
             const writer = buffered.writer();
 
-            try printInfo(writer, &library, args.path, args);
+            try printInfo(state, writer, args.path, args);
             for (overflow.items) |path| {
                 try writer.writeAll("\n");
-                try printInfo(writer, &library, path, args);
+                try printInfo(state, writer, path, args);
             }
 
             try buffered.flush();
