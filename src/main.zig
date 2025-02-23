@@ -320,6 +320,32 @@ fn printInfo(state: *State, dir: std.fs.Dir, writer: anytype, path: []const u8, 
     }
 }
 
+fn listFiles(state: *State, writer: anytype, args: ListArguments.Parsed) !void {
+    _ = args;
+    var walker = try state.dir.walk(state.allocator);
+    defer walker.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(state.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var file_paths = std.ArrayList([]const u8).init(alloc);
+
+    while (try walker.next()) |item| {
+        switch (item.kind) {
+            .file => {
+                try file_paths.append(try alloc.dupe(u8, item.path));
+            },
+            else => {},
+        }
+    }
+
+    for (file_paths.items) |path| {
+        try printInfo(state, state.dir, writer, path, false);
+        try writer.writeAll("\n");
+    }
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -359,19 +385,7 @@ pub fn main() !void {
             }
         },
         .list => |args| {
-            _ = args;
-            var walker = try state.dir.walk(state.allocator);
-            defer walker.deinit();
-
-            while (try walker.next()) |item| {
-                switch (item.kind) {
-                    .file => {
-                        try printInfo(state, state.dir, writer, item.path, false);
-                        try writer.writeAll("\n");
-                    },
-                    else => {},
-                }
-            }
+            try listFiles(state, writer, args);
         },
     }
 
