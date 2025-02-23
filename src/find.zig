@@ -1,15 +1,35 @@
 const std = @import("std");
 const fuzzig = @import("fuzzig");
 const termui = @import("termui");
+const farbe = @import("farbe");
 
 const AUTHOR_PAD = 45;
 const TITLE_SIZE = 85;
+const NEEDLE_MATCH = 256;
+
+const HIGHLIGHT_COLOR = farbe.Farbe.init().fgRgb(255, 0, 0).bold();
 
 const Paper = @import("main.zig").Paper;
 
 pub const Action = enum {
     select,
 };
+
+fn writeHighlighted(
+    writer: anytype,
+    text: []const u8,
+    highlight: []const usize,
+) !void {
+    var hi: usize = 0;
+    for (text, 0..) |c, i| {
+        if (hi < highlight.len and highlight[hi] == i) {
+            try HIGHLIGHT_COLOR.write(writer, "{c}", .{c});
+            hi += 1;
+        } else {
+            try writer.writeByte(c);
+        }
+    }
+}
 
 fn writeAuthor(
     writer: anytype,
@@ -45,10 +65,19 @@ fn writeAuthor(
     return len;
 }
 
+const MatchInfo = struct {
+    num_matches: usize = 0,
+    buf: []usize,
+
+    pub fn get(m: MatchInfo) []const usize {
+        return m.buf[0..m.num_matches];
+    }
+};
+
 const Wrapper = struct {
     allocator: std.mem.Allocator,
 
-    input_buffer: [256]u8 = undefined,
+    input_buffer: [NEEDLE_MATCH]u8 = undefined,
     input_index: usize = 0,
 
     finder: *fuzzig.Ascii,
@@ -58,7 +87,8 @@ const Wrapper = struct {
     scores: []?i32,
     ordering: []usize,
 
-    // match_indices: [][]usize,
+    match_buffer: []usize,
+    match_indices: []MatchInfo,
 
     time: u64 = 0,
     matched: usize = 0,
@@ -67,6 +97,8 @@ const Wrapper = struct {
     pub fn deinit(self: *Wrapper) void {
         self.allocator.free(self.scores);
         self.allocator.free(self.ordering);
+        self.allocator.free(self.match_buffer);
+        self.allocator.free(self.match_indices);
         self.finder.deinit();
         self.allocator.destroy(self.finder);
         self.* = undefined;
@@ -87,10 +119,22 @@ const Wrapper = struct {
         finder.* = try fuzzig.Ascii.init(
             allocator,
             1024,
-            256,
+            NEEDLE_MATCH,
             .{ .case_sensitive = false, .wildcard_spaces = true },
         );
         errdefer finder.deinit();
+
+        const match_buffer = try allocator.alloc(usize, NEEDLE_MATCH * papers.len);
+        errdefer allocator.free(match_buffer);
+
+        const match_indices = try allocator.alloc(MatchInfo, papers.len);
+        errdefer allocator.free(match_indices);
+
+        for (match_indices, 0..) |*mi, i| {
+            mi.* = .{
+                .buf = match_buffer[i * NEEDLE_MATCH .. (i + 1) * NEEDLE_MATCH],
+            };
+        }
 
         return .{
             .allocator = allocator,
@@ -98,6 +142,8 @@ const Wrapper = struct {
             .papers = papers,
             .scores = scores,
             .ordering = ordering,
+            .match_buffer = match_buffer,
+            .match_indices = match_indices,
         };
     }
 
@@ -125,28 +171,39 @@ const Wrapper = struct {
 
         self.matched = 0;
         if (search_string.len != 0 and self.update_search) {
-            for (self.scores, 0..) |*score, i| {
+            var timer = try std.time.Timer.start();
+            for (self.match_indices, self.scores, 0..) |*mi, *score, i| {
                 const sm = self.finder.scoreMatches(
                     self.papers[i].title,
                     search_string,
                 );
+
+                std.mem.copyBackwards(usize, mi.buf, sm.matches);
+                mi.num_matches = sm.matches.len;
+
                 if (sm.score) |_| {
                     self.matched += 1;
                 }
+
                 score.* = sm.score;
             }
             std.sort.heap(usize, self.ordering, self, Wrapper.sortOrdering);
             s.capSelection(self.matched);
+            self.time = timer.lap();
         } else {
             @memset(self.scores, 0);
+            for (self.match_indices) |*mi| mi.num_matches = 0;
             self.matched = self.scores.len;
         }
 
-        const duration_formatter = std.fmt.fmtDuration(@abs(self.time * 1000));
-        _ = duration_formatter;
         try s.display.printToRowC(0, "Found {d} matches", .{self.matched});
 
         const status_row = s.display.max_rows - 1;
+        try s.display.printToRowC(
+            status_row - 1,
+            "Duration: {s}",
+            .{std.fmt.fmtDuration(self.time)},
+        );
         try s.display.printToRowC(
             status_row,
             "Find: {s}",
@@ -162,19 +219,27 @@ const Wrapper = struct {
         out: anytype,
         index: usize,
     ) anyerror!void {
+        const score = self.scores[self.ordering[index]] orelse return;
+        const paper = self.papers[self.ordering[index]];
+        const match_indices = self.match_indices[self.ordering[index]];
+
+        // TODO: this is completely overkill
         var buf = std.ArrayList(u8).init(self.allocator);
         defer buf.deinit();
 
         const writer = buf.writer();
 
-        const paper = self.papers[self.ordering[index]];
-        const score = self.scores[self.ordering[index]] orelse return;
-
         try writer.print("{d: >4} ", .{@abs(score)});
         const author_len = try writeAuthor(writer, paper.authors);
         try writer.writeByteNTimes(' ', AUTHOR_PAD -| author_len);
 
-        try writer.writeAll(paper.title[0..@min(TITLE_SIZE, paper.title.len)]);
+        try writer.print("({d: >4}) ", .{paper.year});
+
+        try writeHighlighted(
+            writer,
+            paper.title[0..@min(TITLE_SIZE, paper.title.len)],
+            match_indices.get(),
+        );
 
         try out.writeAll(buf.items);
     }
@@ -192,10 +257,21 @@ const Wrapper = struct {
                 => {
                     if (self.scores.len - s.selection >= self.matched) return .skip;
                 },
+                // forward to be handled
                 termui.ctrl('j'),
                 termui.ctrl('d'),
+                termui.Key.Enter,
                 termui.ctrl('c'),
                 => {},
+                termui.ctrl('w') => {
+                    const index = std.mem.lastIndexOfScalar(
+                        u8,
+                        std.mem.trimRight(u8, self.input_buffer[0..self.input_index], " "),
+                        ' ',
+                    ) orelse 0;
+                    self.input_index = index;
+                    return .skip;
+                },
                 termui.Key.Backspace => {
                     self.input_index -|= 1;
                     self.update_search = true;
