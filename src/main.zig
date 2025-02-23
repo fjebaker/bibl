@@ -1,31 +1,53 @@
 const std = @import("std");
 const farbe = @import("farbe");
-const clippy = @import("clippy").ClippyInterface(.{});
+const clippy = @import("clippy");
 
 const AUTHOR_COLOR = farbe.Farbe.init().fgRgb(193, 156, 0);
 const HIGHLIGHT_COLOR = farbe.Farbe.init().fgRgb(58, 150, 221);
+const ERROR_COLOR = farbe.Farbe.init().fgRgb(255, 0, 0);
 
-const Commands = clippy.Commands(.{
-    .commands = &.{
+fn writeError(err: anyerror, comptime fmt: []const u8, args: anytype) !void {
+    const stderr = std.io.getStdErr();
+    const color = stderr.isTty();
+
+    const writer = stderr.writer();
+
+    if (color) try ERROR_COLOR.writeOpen(writer);
+    try writer.print("Error {any}", .{err});
+    if (color) try ERROR_COLOR.writeClose(writer);
+
+    try writer.writeAll(": ");
+    try writer.print(fmt, args);
+    try writer.writeAll("\n");
+
+    std.process.cleanExit();
+    return err;
+}
+
+pub const clippy_options: clippy.Options = .{
+    .errorFn = writeError,
+};
+
+const InfoArguments = clippy.Arguments(
+    &.{
         .{
-            .name = "info",
-            .help = "Print information about a file.",
-            .args = &.{
-                .{
-                    .arg = "path",
-                    .help = "Path to the PDF file to read the metadata from",
-                    .required = true,
-                },
-                .{
-                    .arg = "--raw",
-                    .help =
-                    \\Do not do any string manipulation, print extracted
-                    \\information in standard plaintext.
-                    ,
-                },
-            },
+            .arg = "path",
+            .display_name = "path [path ...]",
+            .help = "Path(s) to the PDF file(s) to read the metadata from.",
+            .required = true,
+        },
+        .{
+            .arg = "--raw",
+            .help =
+            \\Do not do any string manipulation, print extracted
+            \\information in standard plaintext.
+            ,
         },
     },
+);
+
+const Commands = clippy.Commands(union(enum) {
+    info: InfoArguments,
 });
 
 const MemoryMappedFile = struct {
@@ -210,6 +232,54 @@ pub const Library = struct {
     }
 };
 
+fn tagColour(tag: []const u8) farbe.Farbe {
+    const hash: u24 = @truncate(std.hash.Wyhash.hash(0, tag));
+    return farbe.Farbe.init().fgRgb(
+        @intCast((hash >> 16) & 0b11111111),
+        @intCast((hash >> 8) & 0b11111111),
+        @intCast(hash & 0b11111111),
+    );
+}
+
+fn printInfo(writer: anytype, library: *Library, path: []const u8, args: InfoArguments.Parsed) !void {
+    const file = try mmap(path);
+    defer file.deinit();
+
+    const paper = try library.parsePaper(file.ptr);
+
+    if (args.raw) {
+        try writer.writeAll(paper.info_map.get("Title") orelse "");
+        try writer.writeAll("\n");
+        try writer.writeAll(paper.info_map.get("Author") orelse "");
+        try writer.writeAll("\n");
+        try writer.writeAll(paper.info_map.get("Keywords") orelse "");
+        try writer.writeAll("\n");
+    } else {
+        for (0.., paper.authors) |i, auth| {
+            try AUTHOR_COLOR.write(writer, "{s}", .{auth});
+            if (i != paper.authors.len - 1) {
+                try writer.writeAll(", ");
+            }
+        }
+        try writer.print(" {d}", .{paper.year});
+        try writer.writeAll("\n");
+
+        try writer.writeAll("Title   : ");
+        try writer.writeAll(paper.title);
+        try writer.writeAll("\n");
+
+        try writer.writeAll("Tags    : ");
+        for (0.., paper.tags) |i, tag| {
+            const tag_color = tagColour(tag);
+            try tag_color.write(writer, "@{s}", .{tag});
+            if (i != paper.tags.len - 1) {
+                try writer.writeAll(" ");
+            }
+        }
+        try writer.writeAll("\n");
+    }
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -218,53 +288,32 @@ pub fn main() !void {
     const raw_args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, raw_args);
 
-    var itt = clippy.ArgIterator.init(raw_args);
-    // eat the name
-    _ = try itt.next();
-    const command = try Commands.parseAll(&itt);
+    var overflow = std.ArrayList([]const u8).init(allocator);
+    defer overflow.deinit();
+
+    const Ctx = struct {
+        fn handleArg(l: *std.ArrayList([]const u8), p: *const Commands, arg: clippy.Arg) anyerror!void {
+            if (arg.flag) try p.throwError(clippy.ParseError.InvalidFlag, "{s}", .{arg.string});
+            try l.append(arg.string);
+        }
+    };
+
+    var itt = clippy.ArgumentIterator.init(raw_args[1..]);
+    var parser = Commands.init(&itt, .{});
+    const command = try parser.parseAllCtx(&overflow, .{ .unhandled_arg = Ctx.handleArg });
 
     var library = Library.init(allocator);
     defer library.deinit();
 
-    switch (command.commands) {
+    switch (command) {
         .info => |args| {
-            const file = try mmap(args.path);
-            defer file.deinit();
-
-            const paper = try library.parsePaper(file.ptr);
-
             var buffered = std.io.bufferedWriter(std.io.getStdOut().writer());
-            var writer = buffered.writer();
+            const writer = buffered.writer();
 
-            if (args.raw) {
-                try writer.writeAll(paper.info_map.get("Title") orelse "");
+            try printInfo(writer, &library, args.path, args);
+            for (overflow.items) |path| {
                 try writer.writeAll("\n");
-                try writer.writeAll(paper.info_map.get("Author") orelse "");
-                try writer.writeAll("\n");
-                try writer.writeAll(paper.info_map.get("Keywords") orelse "");
-                try writer.writeAll("\n");
-            } else {
-                for (0.., paper.authors) |i, auth| {
-                    try AUTHOR_COLOR.write(writer, "{s}", .{auth});
-                    if (i != paper.authors.len - 1) {
-                        try writer.writeAll(", ");
-                    }
-                }
-                try writer.print(" {d}", .{paper.year});
-                try writer.writeAll("\n");
-
-                try writer.writeAll("Title   : ");
-                try writer.writeAll(paper.title);
-                try writer.writeAll("\n");
-
-                try writer.writeAll("Tags    : ");
-                for (0.., paper.tags) |i, tag| {
-                    try AUTHOR_COLOR.write(writer, "{s}", .{tag});
-                    if (i != paper.tags.len - 1) {
-                        try writer.writeAll(" ");
-                    }
-                }
-                try writer.writeAll("\n");
+                try printInfo(writer, &library, path, args);
             }
 
             try buffered.flush();
