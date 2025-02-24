@@ -244,6 +244,7 @@ pub const Paper = struct {
     year: u32 = 0,
     title: []const u8 = "",
     tags: []const []const u8 = &.{},
+    abspath: []const u8 = "",
 
     created: u64,
     modified: u64,
@@ -323,11 +324,12 @@ pub const Library = struct {
         const file = try mmap(dir, path);
         defer file.deinit();
 
+        const abspath = try dir.realpathAlloc(self.arena.allocator(), path);
         const stat = try file.file.stat();
-        return try self.parsePaper(file.ptr, stat);
+        return try self.parsePaper(abspath, file.ptr, stat);
     }
 
-    fn parsePaper(self: *Library, contents: []const u8, stat: std.fs.File.Stat) !Paper {
+    fn parsePaper(self: *Library, abspath: []const u8, contents: []const u8, stat: std.fs.File.Stat) !Paper {
         const allocator = self.arena.allocator();
         const index = try findMetadataIndex(allocator, contents);
 
@@ -336,6 +338,7 @@ pub const Library = struct {
 
         var paper: Paper = .{
             .allocator = allocator,
+            .abspath = abspath,
             .modified = @intCast(@divFloor(@abs(stat.atime), std.time.ns_per_ms)),
             .created = @intCast(@divFloor(@abs(stat.ctime), std.time.ns_per_ms)),
         };
@@ -421,14 +424,28 @@ fn findInFiles(
     writer: anytype,
     args: FindArguments.Parsed,
 ) !void {
+    _ = args;
     try state.loadLibrary();
     const outcome = try find.searchPrompt(
         state.allocator,
         state.library.papers.items,
     );
-    std.debug.print(">> {any}\n", .{outcome});
-    _ = writer;
-    _ = args;
+
+    if (outcome) |oc| {
+        const paper = state.library.papers.items[oc.index];
+        try openInReader(state.allocator, paper.abspath);
+        try writer.print("Opening: '{s}'\n", .{paper.abspath});
+    } else {
+        try writer.writeAll("Nothing selected.\n");
+    }
+}
+
+fn openInReader(allocator: std.mem.Allocator, abspath: []const u8) !void {
+    var child = std.process.Child.init(&.{ "okular", abspath }, allocator);
+    child.stderr_behavior = std.process.Child.StdIo.Ignore;
+    child.stdin_behavior = std.process.Child.StdIo.Ignore;
+    child.stdout_behavior = std.process.Child.StdIo.Ignore;
+    try child.spawn();
 }
 
 fn listFiles(
