@@ -94,6 +94,8 @@ const Wrapper = struct {
     matched: usize = 0,
     update_search: bool = false,
 
+    line_buffer: [1024]u8 = undefined,
+
     pub fn deinit(self: *Wrapper) void {
         self.allocator.free(self.scores);
         self.allocator.free(self.ordering);
@@ -169,8 +171,9 @@ const Wrapper = struct {
     pub fn predraw(self: *Wrapper, s: *termui.Selector) anyerror!void {
         const search_string = self.input_buffer[0..self.input_index];
 
-        self.matched = 0;
         if (search_string.len != 0 and self.update_search) {
+            self.matched = 0;
+            self.update_search = false;
             var timer = try std.time.Timer.start();
             for (self.match_indices, self.scores, 0..) |*mi, *score, i| {
                 const sm = self.finder.scoreMatches(
@@ -190,7 +193,7 @@ const Wrapper = struct {
             std.sort.heap(usize, self.ordering, self, Wrapper.sortOrdering);
             s.capSelection(self.matched);
             self.time = timer.lap();
-        } else {
+        } else if (search_string.len == 0) {
             @memset(self.scores, 0);
             for (self.match_indices) |*mi| mi.num_matches = 0;
             self.matched = self.scores.len;
@@ -223,11 +226,8 @@ const Wrapper = struct {
         const paper = self.papers[self.ordering[index]];
         const match_indices = self.match_indices[self.ordering[index]];
 
-        // TODO: this is completely overkill
-        var buf = std.ArrayList(u8).init(self.allocator);
-        defer buf.deinit();
-
-        const writer = buf.writer();
+        var fbs = std.io.fixedBufferStream(&self.line_buffer);
+        const writer = fbs.writer();
 
         try writer.print("{d: >4} ", .{@abs(score)});
         const author_len = try writeAuthor(writer, paper.authors);
@@ -241,7 +241,7 @@ const Wrapper = struct {
             match_indices.get(),
         );
 
-        try out.writeAll(buf.items);
+        try out.writeAll(fbs.getWritten());
     }
 
     pub fn input(
@@ -270,6 +270,7 @@ const Wrapper = struct {
                         ' ',
                     ) orelse 0;
                     self.input_index = index;
+                    self.update_search = true;
                     return .skip;
                 },
                 termui.Key.Backspace => {
