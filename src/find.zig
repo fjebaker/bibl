@@ -116,57 +116,28 @@ fn writeHighlighted(
     }
 }
 
-const AuthorMatches = struct {
-    _buf: [MAX_AUTHORS * 2]usize = undefined,
-    // which author the information belongs to
-    author_index: []const usize = &.{},
-    // how many characters to highlight
-    hl_len: []const usize = &.{},
-};
-
-fn authorMatches(authors: []const []const u8, searches: []const []const u8) ?AuthorMatches {
-    var ao: AuthorMatches = .{};
-    var author_index: usize = 0;
-
-    for (searches) |searched_author| {
-        if (searched_author.len == 0) continue;
-        var matches: bool = false;
-        for (0.., authors) |index, has_author| {
-            // cannot match this author if the searched one is longer
-            if (searched_author.len > has_author.len) continue;
-            const len = @min(searched_author.len, has_author.len);
-
-            if (std.ascii.eqlIgnoreCase(searched_author[0..len], has_author[0..len])) {
-                matches = true;
-                if (author_index < MAX_AUTHORS) {
-                    ao._buf[author_index] = index;
-                    ao._buf[MAX_AUTHORS + author_index] = len;
-                    author_index += 1;
-                }
-                break;
-            }
-        }
-
-        // must match all authors
-        if (!matches) return null;
-    }
-
-    if (author_index == 0) return null;
-    return ao;
-}
-
 fn writeAuthor(
     writer: anytype,
     authors: []const []const u8,
+    match: MatchInfo,
 ) !usize {
-    var len: usize = 0;
+    const author_match_indices = match.getAuthorIndices();
+    const author_highlight_length = match.getAuthorHighlightLength();
 
+    var len: usize = 0;
     var indicator: bool = true;
 
     for (0..@min(3, authors.len)) |index| {
         const a = authors[index];
 
-        try writer.writeAll(a);
+        // do we need to do highlighting
+        if (std.mem.indexOfScalar(usize, author_match_indices, index)) |ind| {
+            const highlight_len = author_highlight_length[ind];
+            try HIGHLIGHT_COLOR.write(writer, "{s}", .{a[0..highlight_len]});
+            try writer.writeAll(a[highlight_len..]);
+        } else {
+            try writer.writeAll(a);
+        }
 
         len += try std.unicode.calcUtf16LeLen(a);
 
@@ -192,12 +163,64 @@ fn writeAuthor(
 const MatchInfo = struct {
     num_matches: usize = 0,
     buf: []usize,
-    author: AuthorMatches = .{},
 
-    pub fn get(m: MatchInfo) []const usize {
+    num_author_match: usize = 0,
+    author_indices: []usize,
+    author_highlight_length: []usize,
+
+    pub fn getAuthorIndices(m: *const MatchInfo) []const usize {
+        return m.author_indices[0..m.num_author_match];
+    }
+
+    pub fn getAuthorHighlightLength(m: *const MatchInfo) []const usize {
+        return m.author_highlight_length[0..m.num_author_match];
+    }
+
+    pub fn setNoMatches(m: *MatchInfo) void {
+        m.num_matches = 0;
+        m.num_author_match = 0;
+    }
+
+    pub fn setAuthorMatch(m: *MatchInfo, index: usize, hl_len: usize) void {
+        if (m.num_author_match >= MAX_AUTHORS) return;
+        m.author_indices[m.num_author_match] = index;
+        m.author_highlight_length[m.num_author_match] = hl_len;
+        m.num_author_match += 1;
+    }
+
+    pub fn get(m: *const MatchInfo) []const usize {
         return m.buf[0..m.num_matches];
     }
 };
+
+fn matchAuthors(authors: []const []const u8, searches: []const []const u8, mi: *MatchInfo) bool {
+    mi.num_author_match = 0;
+
+    for (searches) |searched_author| {
+        if (searched_author.len == 0) continue;
+        var matches: bool = false;
+        for (0.., authors) |index, has_author| {
+            // cannot match this author if the searched one is longer
+            if (searched_author.len > has_author.len) continue;
+            const len = @min(searched_author.len, has_author.len);
+
+            if (std.ascii.eqlIgnoreCase(searched_author[0..len], has_author[0..len])) {
+                matches = true;
+                mi.setAuthorMatch(index, len);
+                break;
+            }
+        }
+
+        // must match all authors
+        if (!matches) {
+            mi.num_author_match = 0;
+            return false;
+        }
+    }
+
+    if (mi.num_author_match == 0) return false;
+    return true;
+}
 
 const Wrapper = struct {
     allocator: std.mem.Allocator,
@@ -251,15 +274,19 @@ const Wrapper = struct {
         );
         errdefer finder.deinit();
 
-        const match_buffer = try allocator.alloc(usize, NEEDLE_MATCH * papers.len);
+        const stride = 2 * MAX_AUTHORS + NEEDLE_MATCH;
+        const match_buffer = try allocator.alloc(usize, stride * papers.len);
         errdefer allocator.free(match_buffer);
 
         const match_indices = try allocator.alloc(MatchInfo, papers.len);
         errdefer allocator.free(match_indices);
 
         for (match_indices, 0..) |*mi, i| {
+            const buf = match_buffer[i * stride .. (i + 1) * stride];
             mi.* = .{
-                .buf = match_buffer[i * NEEDLE_MATCH .. (i + 1) * NEEDLE_MATCH],
+                .buf = buf[0..NEEDLE_MATCH],
+                .author_indices = buf[NEEDLE_MATCH .. NEEDLE_MATCH + MAX_AUTHORS],
+                .author_highlight_length = buf[NEEDLE_MATCH + MAX_AUTHORS ..],
             };
         }
 
@@ -300,7 +327,7 @@ const Wrapper = struct {
 
     fn resetMatches(self: *Wrapper) void {
         @memset(self.scores, 0);
-        for (self.match_indices) |*mi| mi.num_matches = 0;
+        for (self.match_indices) |*mi| mi.setNoMatches();
         self.matched = self.scores.len;
     }
 
@@ -330,10 +357,7 @@ const Wrapper = struct {
             const authors = search_terms.getAuthors();
             if (authors.len > 0) {
                 for (self.papers, self.scores, self.match_indices) |paper, *score, *mi| {
-                    _ = mi;
-                    if (authorMatches(paper.authors, authors)) |author_matches| {
-                        _ = author_matches;
-                    } else {
+                    if (!matchAuthors(paper.authors, authors, mi)) {
                         score.* = null;
                     }
                 }
@@ -383,7 +407,7 @@ const Wrapper = struct {
         const writer = fbs.writer();
 
         try writer.print("{d: >4} ", .{@abs(score)});
-        const author_len = try writeAuthor(writer, paper.authors);
+        const author_len = try writeAuthor(writer, paper.authors, match_indices);
         try writer.writeByteNTimes(' ', AUTHOR_PAD -| author_len);
 
         try writer.print("({d: >4}) ", .{paper.year});
