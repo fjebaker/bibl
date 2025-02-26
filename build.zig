@@ -40,6 +40,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    exe_unit_tests.root_module.addImport("clippy", dep_clippy.module("clippy"));
+    exe_unit_tests.root_module.addImport("farbe", dep_farbe.module("farbe"));
+    exe_unit_tests.root_module.addImport("datetime", dep_datetime.module("zig-datetime"));
+    exe_unit_tests.root_module.addImport("fuzzig", dep_fuzzig.module("fuzzig"));
+    exe_unit_tests.root_module.addImport("termui", dep_termui.module("termui"));
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 

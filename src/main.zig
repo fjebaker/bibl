@@ -5,6 +5,10 @@ const datetime = @import("datetime");
 
 const find = @import("find.zig");
 
+test "main" {
+    _ = find;
+}
+
 const AUTHOR_COLOR = farbe.Farbe.init().fgRgb(193, 156, 0);
 const HIGHLIGHT_COLOR = farbe.Farbe.init().fgRgb(58, 150, 221);
 const ERROR_COLOR = farbe.Farbe.init().fgRgb(255, 0, 0);
