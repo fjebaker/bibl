@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("clippy", dep_clippy.module("clippy"));
     exe.root_module.addImport("farbe", dep_farbe.module("farbe"));
-    exe.root_module.addImport("datetime", dep_datetime.module("zig-datetime"));
+    exe.root_module.addImport("datetime", dep_datetime.module("datetime"));
     exe.root_module.addImport("fuzzig", dep_fuzzig.module("fuzzig"));
     exe.root_module.addImport("termui", dep_termui.module("termui"));
 
@@ -42,7 +42,7 @@ pub fn build(b: *std.Build) void {
     });
     exe_unit_tests.root_module.addImport("clippy", dep_clippy.module("clippy"));
     exe_unit_tests.root_module.addImport("farbe", dep_farbe.module("farbe"));
-    exe_unit_tests.root_module.addImport("datetime", dep_datetime.module("zig-datetime"));
+    exe_unit_tests.root_module.addImport("datetime", dep_datetime.module("datetime"));
     exe_unit_tests.root_module.addImport("fuzzig", dep_fuzzig.module("fuzzig"));
     exe_unit_tests.root_module.addImport("termui", dep_termui.module("termui"));
 

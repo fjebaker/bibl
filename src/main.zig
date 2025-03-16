@@ -150,7 +150,7 @@ fn writeError(err: anyerror, comptime fmt: []const u8, args: anytype) !void {
 
 const MemoryMappedFile = struct {
     file: std.fs.File,
-    ptr: []align(std.mem.page_size) const u8,
+    ptr: []align(std.heap.pageSize()) const u8,
 
     pub fn deinit(self: MemoryMappedFile) void {
         std.posix.munmap(self.ptr);
