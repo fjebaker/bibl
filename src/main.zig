@@ -343,7 +343,7 @@ pub const Library = struct {
         var paper: Paper = .{
             .allocator = allocator,
             .abspath = abspath,
-            .modified = @intCast(@divFloor(@abs(stat.atime), std.time.ns_per_ms)),
+            .modified = @intCast(@divFloor(@abs(stat.mtime), std.time.ns_per_ms)),
             .created = @intCast(@divFloor(@abs(stat.ctime), std.time.ns_per_ms)),
         };
 
