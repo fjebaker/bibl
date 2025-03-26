@@ -47,6 +47,10 @@ const ListArguments = clippy.Arguments(&.{
         .help = "How to sort the listed items.",
     },
     .{
+        .arg = "--last",
+        .help = "Sort by last modified (alias for `--sort=modified`)",
+    },
+    .{
         .arg = "-r/--reverse",
         .help = "Reverse the order.",
     },
@@ -535,16 +539,31 @@ pub fn main() !void {
                 }
             },
             .list => |args| {
-                const sort = std.meta.stringToEnum(
-                    SortStrategy,
-                    args.sort orelse "author",
-                ) orelse {
-                    try parser.throwError(
-                        clippy.ParseError.InvalidFlag,
-                        "Failed to parse sort strategy: '{s}'",
-                        .{args.sort.?},
-                    );
-                    unreachable;
+                const sort: SortStrategy = b: {
+                    if (args.last) {
+                        if (args.sort) |srt| {
+                            if (!std.mem.eql(u8, "modified", srt)) {
+                                try parser.throwError(
+                                    clippy.ParseError.DuplicateFlag,
+                                    "Cannot specify both --last and --sort={s}",
+                                    .{srt},
+                                );
+                            }
+                        }
+                        break :b .modified;
+                    } else {
+                        break :b std.meta.stringToEnum(
+                            SortStrategy,
+                            args.sort orelse "author",
+                        ) orelse {
+                            try parser.throwError(
+                                clippy.ParseError.InvalidFlag,
+                                "Failed to parse sort strategy: '{s}'",
+                                .{args.sort.?},
+                            );
+                            unreachable;
+                        };
+                    }
                 };
                 try listFiles(state, writer, args, sort);
             },
