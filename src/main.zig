@@ -195,39 +195,106 @@ fn findMetadataIndex(allocator: std.mem.Allocator, file: []const u8) !usize {
 }
 
 const StringMap = std.StringHashMap([]const u8);
-fn parseMetadataMap(allocator: std.mem.Allocator, contents: []const u8) !StringMap {
+
+pub const MetadataMap = struct {
+    end_offset: usize,
+    map: StringMap,
+
+    pub fn deinit(self: *MetadataMap) void {
+        self.map.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const PDFTokenizer = struct {
+    content: []const u8,
+    index: usize = 0,
+
+    pub fn init(content: []const u8) PDFTokenizer {
+        return .{ .content = content };
+    }
+
+    pub fn peek(self: *PDFTokenizer) ?[]const u8 {
+        const index = self.index;
+        const n = self.next();
+        self.index = index;
+        return n;
+    }
+
+    pub fn next(self: *PDFTokenizer) ?[]const u8 {
+        var start = self.index;
+        while (self.index < self.content.len) {
+            switch (self.content[self.index]) {
+                ' ', '\r', '\n' => {
+                    if (self.index - start > 0) {
+                        return self.content[start..self.index];
+                    } else {
+                        start = self.index + 1;
+                    }
+                },
+                '(', ')' => {
+                    if (self.index - start == 0) {
+                        self.index += 1;
+                    }
+                    return self.content[start..self.index];
+                },
+                '<', '>' => {
+                    const n = self.content[self.index + 1];
+                    if (n == '>' or n == '<') {
+                        self.index += 2;
+                        return self.content[start..self.index];
+                    }
+                },
+                else => {},
+            }
+            self.index += 1;
+        }
+
+        return null;
+    }
+};
+
+fn parseMetadataMap(allocator: std.mem.Allocator, contents: []const u8) !MetadataMap {
     var map = StringMap.init(allocator);
     errdefer map.deinit();
 
-    var itt = std.mem.tokenizeAny(u8, contents, "\n\r");
+    var itt = PDFTokenizer.init(contents);
     // skip ahead to the start of the map
-    while (itt.peek()) |peeked| {
-        const token = std.mem.trim(u8, peeked, " \n\r");
+    while (itt.peek()) |token| {
         if (token.len > 1 and std.mem.eql(u8, token, "<<")) {
             break;
         }
         _ = itt.next();
     }
 
-    while (itt.next()) |next_token| {
-        const token = std.mem.trim(u8, next_token, " \n\r");
+    while (itt.next()) |token| {
         if (token.len > 1 and std.mem.eql(u8, token, ">>")) {
             // map end
             break;
         }
 
         if (token[0] == '/') {
-            if (std.mem.indexOfScalar(u8, token, ' ')) |index| {
-                const value = switch (token[index + 1]) {
-                    '/' => token[index + 2 ..],
-                    '(' => token[index + 2 .. token.len - 1],
-                    else => token,
-                };
-                try map.put(token[1..index], value);
-            }
+            const value = b: {
+                if (itt.peek()) |p| {
+                    // eat the opening '('
+                    if (p[0] == '(') {
+                        _ = itt.next();
+                        const value_start = itt.index;
+                        while ((itt.next())) |n| {
+                            if (n.len == 1 and n[0] == ')') break;
+                        }
+                        break :b itt.content[value_start .. itt.index - 1];
+                    } else {
+                        break :b itt.next().?;
+                    }
+                }
+                unreachable;
+            };
+
+            try map.put(token[1..], value);
         }
     }
-    return map;
+    return .{ .end_offset = itt.index, .map = map };
 }
 
 pub fn mmap(dir: std.fs.Dir, filename: []const u8) !MemoryMappedFile {
@@ -341,7 +408,7 @@ pub const Library = struct {
         const allocator = self.arena.allocator();
         const index = try findMetadataIndex(allocator, contents);
 
-        var map = try parseMetadataMap(allocator, contents[index..]);
+        var map = (try parseMetadataMap(allocator, contents[index..])).map;
         defer map.deinit();
 
         var paper: Paper = .{
