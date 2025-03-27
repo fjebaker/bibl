@@ -3,7 +3,7 @@ const fuzzig = @import("fuzzig");
 const termui = @import("termui");
 const farbe = @import("farbe");
 
-const AUTHOR_PAD = 45;
+const AUTHOR_PAD = 33;
 const TITLE_SIZE = 85;
 const NEEDLE_MATCH = 256;
 
@@ -127,7 +127,7 @@ fn writeAuthor(
     var len: usize = 0;
     var indicator: bool = true;
 
-    for (0..@min(3, authors.len)) |index| {
+    for (0..@min(2, authors.len)) |index| {
         const a = authors[index];
 
         // do we need to do highlighting
@@ -142,7 +142,7 @@ fn writeAuthor(
         len += try std.unicode.calcUtf16LeLen(a);
 
         // dont write a comma for the last author
-        if (index != 2 and index != authors.len - 1) {
+        if (index != 1 and index != authors.len - 1) {
             try writer.writeAll(", ");
             len += 2;
         }
@@ -244,6 +244,8 @@ const Wrapper = struct {
 
     line_buffer: [1024]u8 = undefined,
 
+    col_max: usize = 0,
+
     pub fn deinit(self: *Wrapper) void {
         self.allocator.free(self.scores);
         self.allocator.free(self.ordering);
@@ -290,6 +292,18 @@ const Wrapper = struct {
             };
         }
 
+        var buf: std.posix.winsize = undefined;
+        const col_max = b: switch (std.posix.errno(
+            std.posix.system.ioctl(
+                std.io.getStdOut().handle,
+                std.posix.T.IOCGWINSZ,
+                @intFromPtr(&buf),
+            ),
+        )) {
+            .SUCCESS => break :b buf.col,
+            else => return error.IoctlError,
+        };
+
         var self: Wrapper = .{
             .allocator = allocator,
             .finder = finder,
@@ -298,6 +312,7 @@ const Wrapper = struct {
             .ordering = ordering,
             .match_buffer = match_buffer,
             .match_indices = match_indices,
+            .col_max = col_max,
         };
 
         // sort the initial ordering
@@ -412,9 +427,11 @@ const Wrapper = struct {
 
         try writer.print("({d: >4}) ", .{paper.year});
 
+        const written = 15 + AUTHOR_PAD;
+
         try writeHighlighted(
             writer,
-            paper.title[0..@min(TITLE_SIZE, paper.title.len)],
+            paper.title[0..@min(self.col_max - written, paper.title.len)],
             match_indices.get(),
         );
 
