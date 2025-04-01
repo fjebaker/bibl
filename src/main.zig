@@ -581,6 +581,136 @@ fn listFiles(
     }
 }
 
+const PDFFile = struct {
+    const XRefTable = struct {
+        const XRef = struct {
+            offset: usize,
+            // How old the object is
+            generation: usize,
+            // true: normal in-use, false: free object
+            in_use: bool,
+        };
+
+        // byte offset where the startxref entry is
+        startxref_offset: usize,
+        // the offsets of the table itself
+        start_offset: usize,
+        end_offset: usize,
+
+        // the start offset and number of entries:  maps the first index to the
+        // number of entries
+        headers: std.AutoHashMap(usize, usize),
+        // the entries in the table
+        entries: std.AutoArrayHashMap(usize, XRef),
+    };
+
+    contents: []const u8,
+    allocator: std.mem.Allocator,
+    xrefs: std.ArrayList(XRefTable),
+
+    pub fn init(allocator: std.mem.Allocator, contents: []const u8) PDFFile {
+        const xrefs = std.ArrayList(XRefTable).init(allocator);
+        return .{
+            .contents = contents,
+            .allocator = allocator,
+            .xrefs = xrefs,
+        };
+    }
+
+    fn parseXrefOffset(self: *const PDFFile, start: usize) !usize {
+        var itt = PDFTokenizer.init(self.contents[start..]);
+        // throw away the 'startxref'
+        _ = itt.next();
+        // get the byte offset of the xref table
+        return std.fmt.parseInt(usize, itt.next().?, 10);
+    }
+
+    pub fn parseXrefTables(self: *PDFFile) !void {
+        var end: usize = self.contents.len;
+
+        // TODO: this is a workaround for EXIFTOOL that can occasionally write
+        // a 'startxref' that is beyond th eend of the file. If this is the
+        // case, we just read the next 'startxref' to find the next table
+        while (std.mem.lastIndexOf(u8, self.contents[0..end], "startxref")) |start| {
+            end = start;
+
+            const offset = try self.parseXrefOffset(start);
+            if (offset >= self.contents.len) {
+                logger.warn(
+                    "startxref offset: {d} is bigger than size of file ({d})",
+                    .{ offset, self.contents.len },
+                );
+                continue;
+            }
+
+            var itt = PDFTokenizer.init(self.contents[offset..]);
+
+            if (!std.mem.eql(u8, "xref", itt.next().?)) {
+                logger.err("xref: invalid format", .{});
+                return PDFError.MissingXRef;
+            }
+
+            var table: XRefTable = undefined;
+            table.startxref_offset = start;
+            table.start_offset = offset;
+
+            var headers = std.AutoHashMap(usize, usize).init(self.allocator);
+            errdefer headers.deinit();
+
+            var entries = std.AutoArrayHashMap(usize, XRefTable.XRef).init(self.allocator);
+            errdefer entries.deinit();
+
+            var header_start: usize = 0;
+            var header_number_entries: usize = 0;
+
+            var i: usize = 0;
+            while (itt.next()) |token| {
+                if (std.mem.eql(u8, token, "trailer")) break;
+                const v1 = try std.fmt.parseInt(usize, token, 10);
+                const v2 = try std.fmt.parseInt(usize, itt.next().?, 10);
+                const v3 = itt.peek().?;
+
+                if (v3[0] == 'n' or v3[0] == 'f') {
+                    const xref: XRefTable.XRef = .{
+                        .offset = v1,
+                        .generation = v2,
+                        .in_use = itt.next().?[0] == 'n',
+                    };
+                    entries.putAssumeCapacityNoClobber(header_start + i, xref);
+
+                    i += 1;
+                } else {
+                    if (i != header_number_entries) {
+                        logger.warn(
+                            "xref: expected {d} entries, only found {d}\n",
+                            .{ header_number_entries, i },
+                        );
+                    }
+
+                    i = 0;
+                    header_start = v1;
+                    header_number_entries = v2;
+
+                    try headers.put(header_start, header_number_entries);
+                    try entries.ensureUnusedCapacity(header_number_entries);
+                }
+            }
+
+            table.end_offset = table.start_offset + itt.index;
+
+            table.entries = entries;
+            try self.xrefs.append(table);
+        }
+    }
+
+    pub fn deinit(self: *PDFFile) void {
+        for (self.xrefs.items) |*xref_table| {
+            xref_table.entries.deinit();
+        }
+        self.xrefs.deinit();
+    }
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
