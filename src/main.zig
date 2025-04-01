@@ -5,6 +5,8 @@ const datetime = @import("datetime");
 
 const find = @import("find.zig");
 
+const logger = std.log.scoped(.bibl);
+
 test "main" {
     _ = find;
 }
@@ -17,6 +19,7 @@ const USAGE =
     \\bibl: a command line bibliography and library manager
 ;
 
+const PDFError = error{ OffsetTooBig, MissingXRef };
 const BiblError = error{ NoTrailer, NoMetadataFound, NoAuthors };
 
 pub const clippy_options: clippy.Options = .{
@@ -194,11 +197,29 @@ fn findMetadataIndex(allocator: std.mem.Allocator, file: []const u8) !usize {
     return BiblError.NoMetadataFound;
 }
 
-const StringMap = std.StringHashMap([]const u8);
+const StringMap = std.StringArrayHashMap([]const u8);
 
 pub const MetadataMap = struct {
+    start_offset: usize,
     end_offset: usize,
     map: StringMap,
+
+    pub fn write(self: *const MetadataMap, writer: anytype) !void {
+        try writer.writeAll("<<\n");
+
+        var itt = self.map.iterator();
+        while (itt.next()) |kv| {
+            try writer.print("/{s} ", .{kv.key_ptr.*});
+            if (kv.value_ptr.*.len > 0 and kv.value_ptr.*[0] == '/') {
+                try writer.writeAll(kv.value_ptr.*);
+            } else {
+                try writer.print("({s})", .{kv.value_ptr.*});
+            }
+            try writer.writeAll("\n");
+        }
+
+        try writer.writeAll(">>\n");
+    }
 
     pub fn deinit(self: *MetadataMap) void {
         self.map.deinit();
@@ -267,6 +288,8 @@ fn parseMetadataMap(allocator: std.mem.Allocator, contents: []const u8) !Metadat
         _ = itt.next();
     }
 
+    const start_offset = itt.index;
+
     while (itt.next()) |token| {
         if (token.len > 1 and std.mem.eql(u8, token, ">>")) {
             // map end
@@ -294,7 +317,11 @@ fn parseMetadataMap(allocator: std.mem.Allocator, contents: []const u8) !Metadat
             try map.put(token[1..], value);
         }
     }
-    return .{ .end_offset = itt.index, .map = map };
+    return .{
+        .start_offset = start_offset,
+        .end_offset = itt.index,
+        .map = map,
+    };
 }
 
 pub fn mmap(dir: std.fs.Dir, filename: []const u8) !MemoryMappedFile {
