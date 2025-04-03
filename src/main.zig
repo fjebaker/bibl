@@ -949,6 +949,7 @@ const PDFFile = struct {
     pub fn deinit(self: *PDFFile) void {
         for (self.xrefs.items) |*xref_table| {
             xref_table.entries.deinit();
+            xref_table.headers.deinit();
         }
         self.xrefs.deinit();
         self.starts.deinit();
