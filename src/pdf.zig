@@ -78,16 +78,34 @@ pub fn parseMetadataMap(
         if (token[0] == '/') {
             const value = b: {
                 if (itt.peek()) |p| {
-                    // eat the opening '('
-                    if (p[0] == '(') {
+                    // eat the opening brackets
+                    if (p[0] == '(' or p[0] == '[') {
+                        const closing: u8 = switch (p[0]) {
+                            '(' => ')',
+                            '[' => ']',
+                            else => unreachable,
+                        };
                         _ = itt.next();
                         const value_start = itt.index;
                         while ((itt.next())) |n| {
-                            if (n.len == 1 and n[0] == ')') break;
+                            if (n.len == 1 and n[0] == closing) break;
                         }
                         break :b itt.content[value_start .. itt.index - 1];
                     } else {
-                        break :b itt.next().?;
+                        switch (p[0]) {
+                            '/', '>' => break :b itt.next().?,
+                            else => {},
+                        }
+
+                        const value_start = itt.index;
+                        _ = itt.next();
+                        while (itt.peek()) |peek| {
+                            switch (peek[0]) {
+                                '/', '>' => break :b std.mem.trim(u8, itt.content[value_start..itt.index], " "),
+                                else => _ = itt.next(),
+                            }
+                        }
+                        unreachable;
                     }
                 }
                 unreachable;
@@ -105,7 +123,11 @@ fn testParseMap(expected_keys: []const []const u8, expected_values: []const []co
     var map = try parseMetadataMap(std.testing.allocator, string, 0);
     defer map.deinit();
 
-    for (expected_keys, map.map.keys(), expected_values, map.map.values()) |exp, acc, exp_v, acc_v| {
+    for (0..@max(expected_keys.len, map.map.keys().len)) |i| {
+        const exp = expected_keys[i];
+        const exp_v = expected_values[i];
+        const acc = map.map.keys()[i];
+        const acc_v = map.map.values()[i];
         try std.testing.expectEqualStrings(exp, acc);
         try std.testing.expectEqualStrings(exp_v, acc_v);
     }
@@ -116,6 +138,16 @@ test "metedata-map" {
         &.{ "Time", "Hello" },
         &.{ "something", "world" },
         "<</Time something /Hello world>>",
+    );
+    try testParseMap(
+        &.{ "Time", "Hello" },
+        &.{ "something", "hello world" },
+        "<</Time something /Hello (hello world)>>",
+    );
+    try testParseMap(
+        &.{ "Size", "ID", "Root", "Prev", "Info" },
+        &.{ "1255", "(text1) (text2) ", "1247 0 R", "1590635", "1248 0 R" },
+        "<</Size 1255 /ID [(text1) (text2) ] /Root 1247 0 R /Prev 1590635 /Info 1248 0 R >>",
     );
 }
 
@@ -208,6 +240,15 @@ test "pdf-tokenize" {
     try testPDFTokenize(
         &.{ "<<", "/Key", "[", "value", "things", "]", ">>" },
         "<</Key [value things]>>",
+    );
+    try testPDFTokenize(
+        &.{
+            "<<", "/Size", "1255",  "/ID",     "[",     "(",     "text1",
+            ")",  "(",     "text2", ")",       "]",     "/Root", "1247",
+            "0",  "R",     "/Prev", "1590635", "/Info", "1248",  "0",
+            "R",  ">>",
+        },
+        "<</Size 1255 /ID [(text1) (text2) ] /Root 1247 0 R /Prev 1590635 /Info 1248 0 R >>",
     );
 }
 
