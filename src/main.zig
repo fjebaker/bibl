@@ -277,6 +277,10 @@ pub const PDFTokenizer = struct {
                         start = self.index + 1;
                     }
                 },
+                '\\' => {
+                    // skip the next character
+                    self.index += 1;
+                },
                 '(', ')' => {
                     if (self.index - start == 0) {
                         self.index += 1;
