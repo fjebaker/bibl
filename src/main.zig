@@ -49,6 +49,8 @@ const AddArguments = clippy.Arguments(
     },
 );
 
+const MigrateArguments = clippy.Arguments(&.{});
+
 const InfoArguments = clippy.Arguments(
     &.{
         .{
@@ -93,6 +95,7 @@ const Commands = clippy.Commands(union(enum) {
     info: InfoArguments,
     list: ListArguments,
     find: FindArguments,
+    migrate: MigrateArguments,
 });
 
 const SortStrategy = enum {
@@ -385,6 +388,41 @@ pub const Paper = struct {
     modified: u64,
 
     allocator: std.mem.Allocator,
+
+    /// Create a canonical file name for this item. Caller owns memory
+    pub fn canonicalise(self: *const Paper, allocator: std.mem.Allocator) ![]const u8 {
+        var title_itt = std.mem.splitAny(u8, self.title, " ");
+        const author_name = switch (self.authors.len) {
+            0 => unreachable,
+            1 => try allocator.dupe(u8, self.authors[0]),
+            2 => try std.fmt.allocPrint(
+                allocator,
+                "{s}_and_{s}",
+                .{ self.authors[0], self.authors[1] },
+            ),
+            else => try std.fmt.allocPrint(
+                allocator,
+                "{s}_{s}_et_al",
+                .{ self.authors[0], self.authors[1] },
+            ),
+        };
+        defer allocator.free(author_name);
+
+        const t1 = title_itt.next().?;
+        if (title_itt.next()) |t2| {
+            return std.fmt.allocPrint(
+                allocator,
+                "{s}_{d}_{s}_{s}.pdf",
+                .{ author_name, self.year, t1, t2 },
+            );
+        } else {
+            return std.fmt.allocPrint(
+                allocator,
+                "{s}_{d}_{s}.pdf",
+                .{ author_name, self.year, t1 },
+            );
+        }
+    }
 
     fn parseInfo(self: *Paper, info_map: StringMap) !void {
         if (info_map.get("Author")) |f| {
@@ -1053,6 +1091,18 @@ pub fn main() !void {
             },
             .find => |args| {
                 try findInFiles(state, writer, args);
+            },
+            .migrate => {
+                var arena = std.heap.ArenaAllocator.init(allocator);
+                defer arena.deinit();
+                const alloc = arena.allocator();
+                try state.loadLibrary();
+                const papers = state.library.papers.items;
+                for (papers) |paper| {
+                    std.debug.print("   {s} ->\n", .{std.fs.path.basename(paper.abspath)});
+                    const filename = try paper.canonicalise(alloc);
+                    try state.dir.rename(std.fs.path.basename(paper.abspath), filename);
+                }
             },
         }
     }
