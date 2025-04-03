@@ -250,6 +250,17 @@ pub const MetadataMap = struct {
     start_offset: usize,
     end_offset: usize,
     map: StringMap,
+    arena: std.heap.ArenaAllocator,
+
+    pub fn init(allocator: std.mem.Allocator) MetadataMap {
+        const arena = std.heap.ArenaAllocator.init(allocator);
+        return .{
+            .start_offset = 0,
+            .end_offset = 0,
+            .map = StringMap.init(allocator),
+            .arena = arena,
+        };
+    }
 
     pub fn write(self: *const MetadataMap, writer: anytype) !void {
         try writer.writeAll("\n<<\n");
@@ -268,7 +279,13 @@ pub const MetadataMap = struct {
         try writer.writeAll(">>");
     }
 
+    pub fn put(self: *MetadataMap, key: []const u8, value: []const u8) !void {
+        const alloc = self.arena.allocator();
+        try self.map.put(try alloc.dupe(u8, key), try alloc.dupe(u8, value));
+    }
+
     pub fn deinit(self: *MetadataMap) void {
+        self.arena.deinit();
         self.map.deinit();
         self.* = undefined;
     }
@@ -332,8 +349,6 @@ fn parseMetadataMap(
     index: usize,
 ) !MetadataMap {
     const contents = all_contents[index..];
-    var map = StringMap.init(allocator);
-    errdefer map.deinit();
 
     var itt = PDFTokenizer.init(contents);
     // skip ahead to the start of the map
@@ -344,7 +359,9 @@ fn parseMetadataMap(
         _ = itt.next();
     }
 
-    const start_offset = itt.index;
+    var meta_map = MetadataMap.init(allocator);
+    errdefer meta_map.deinit();
+    meta_map.start_offset = itt.index + index;
 
     while (itt.next()) |token| {
         if (token.len > 1 and std.mem.eql(u8, token, ">>")) {
@@ -370,14 +387,12 @@ fn parseMetadataMap(
                 unreachable;
             };
 
-            try map.put(token[1..], value);
+            try meta_map.put(token[1..], value);
         }
     }
-    return .{
-        .start_offset = start_offset + index,
-        .end_offset = itt.index + index,
-        .map = map,
-    };
+
+    meta_map.end_offset = itt.index + index;
+    return meta_map;
 }
 
 pub fn mmapWrite(dir: std.fs.Dir, filename: []const u8) !MemoryMappedFile {
@@ -461,6 +476,23 @@ pub const Paper = struct {
                 .{ author_name, self.year, t1 },
             );
         }
+    }
+
+    /// Modify the metadata of a given metadata map to reflect this paper.
+    pub fn insertInto(self: *const Paper, allocator: std.mem.Allocator, meta: *MetadataMap) !void {
+        const year = try std.fmt.allocPrint(allocator, "{d}", .{self.year});
+        defer allocator.free(year);
+
+        const author_list = try std.mem.join(allocator, "+", self.authors);
+        defer allocator.free(author_list);
+
+        const tag_list = try std.mem.join(allocator, " ", self.tags);
+        defer allocator.free(tag_list);
+
+        try meta.put("Author", author_list);
+        try meta.put("PubDate", year);
+        try meta.put("Title", self.title);
+        try meta.put("Keywords", tag_list);
     }
 
     fn parseInfo(self: *Paper, allocator: std.mem.Allocator, info_map: StringMap) !void {
@@ -925,12 +957,31 @@ const PDFFile = struct {
                     deltas.putAssumeCapacityNoClobber(chunk.getEndOffset(), delta);
                 },
                 .startxref => |c| {
+                    var ref_buf = std.ArrayList(u8).init(alloc);
+                    defer ref_buf.deinit();
+
                     var byte_delta: i64 = 0;
-                    for (deltas.values()) |v| byte_delta += v;
-                    try writer.print(
+
+                    var itt = deltas.iterator();
+                    while (itt.next()) |kv| {
+                        const offset = kv.key_ptr.*;
+                        const delta = kv.value_ptr.*;
+                        if (offset <= c.location) byte_delta += delta;
+                    }
+
+                    try ref_buf.writer().print(
                         "startxref\n{d}\n%%EOF",
                         .{@as(i64, @intCast(c.location)) + byte_delta},
                     );
+
+                    try writer.writeAll(ref_buf.items);
+
+                    const old_len = c.end_offset - c.start_offset;
+                    const delta = @as(i64, @intCast(ref_buf.items.len)) - @as(i64, @intCast(old_len));
+
+                    if (delta != 0) {
+                        deltas.putAssumeCapacityNoClobber(chunk.getEndOffset(), delta);
+                    }
                 },
                 .xref => |xr| {
                     var ref_buf = std.ArrayList(u8).init(alloc);
@@ -945,8 +996,7 @@ const PDFFile = struct {
                     const old_len = xr.end_offset - xr.start_offset;
                     const delta = @as(i64, @intCast(xr_slice.len)) - @as(i64, @intCast(old_len));
 
-                    std.debug.assert(delta == 0);
-                    if (delta > 0) {
+                    if (delta != 0) {
                         deltas.putAssumeCapacityNoClobber(chunk.getEndOffset(), delta);
                     }
                 },
@@ -1029,6 +1079,41 @@ fn addPaper(state: *State, args: AddArguments.Parsed) !void {
     try out_file.seekTo(meta.start_offset);
 
     try pdf.writeRestFile(out_file.writer(), .{ .metadata = meta });
+}
+
+fn writeUpdateMetadata(
+    allocator: std.mem.Allocator,
+    file: MemoryMappedFile,
+    meta: MetadataMap,
+) !void {
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+
+    var pdf = PDFFile.init(allocator, file.ptr);
+    defer pdf.deinit();
+
+    pdf.parseXrefTables() catch |err| {
+        switch (err) {
+            PDFError.MissingXRef => {
+                std.debug.print("MISSING OFFSET: assuming we can just continue...\n", .{});
+                for (pdf.xrefs.items) |*xref_table| {
+                    xref_table.entries.deinit();
+                    xref_table.headers.deinit();
+                }
+                pdf.xrefs.clearAndFree();
+            },
+            else => return err,
+        }
+    };
+
+    // write new metadata into a buffer
+    try pdf.writeRestFile(buffer.writer(), .{ .metadata = meta });
+
+    try std.posix.ftruncate(file.file.handle, meta.start_offset);
+
+    try file.file.seekTo(meta.start_offset);
+    // std.debug.print("{s}\n", .{buffer.items});
+    try file.file.writer().writeAll(buffer.items);
 }
 
 pub fn main() !void {
@@ -1124,9 +1209,22 @@ pub fn main() !void {
                 try state.loadLibrary();
                 const papers = state.library.papers.items;
                 for (papers) |paper| {
-                    std.debug.print("   {s} ->\n", .{std.fs.path.basename(paper.abspath)});
-                    const filename = try paper.canonicalise(alloc);
-                    try state.dir.rename(std.fs.path.basename(paper.abspath), filename);
+                    std.debug.print("   {s} ->", .{std.fs.path.basename(paper.abspath)});
+                    // const filename = try paper.canonicalise(alloc);
+                    const filename = std.fs.path.basename(paper.abspath);
+                    // try state.dir.rename(std.fs.path.basename(paper.abspath), filename);
+
+                    const file = try mmapWrite(state.dir, filename);
+                    defer file.deinit();
+
+                    const index = try findMetadataIndex(allocator, file.ptr);
+                    var meta = try parseMetadataMap(allocator, file.ptr, index);
+                    defer meta.deinit();
+
+                    try paper.insertInto(alloc, &meta);
+
+                    try writeUpdateMetadata(allocator, file, meta);
+                    std.debug.print(" Done\n", .{});
                 }
             },
         }
