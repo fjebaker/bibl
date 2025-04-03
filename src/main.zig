@@ -380,8 +380,16 @@ fn parseMetadataMap(
     };
 }
 
+pub fn mmapWrite(dir: std.fs.Dir, filename: []const u8) !MemoryMappedFile {
+    return _mmap(dir, filename, .read_write);
+}
+
 pub fn mmap(dir: std.fs.Dir, filename: []const u8) !MemoryMappedFile {
-    const file = try dir.openFile(filename, .{});
+    return _mmap(dir, filename, .read_only);
+}
+
+fn _mmap(dir: std.fs.Dir, filename: []const u8, mode: std.fs.File.OpenMode) !MemoryMappedFile {
+    const file = try dir.openFile(filename, .{ .mode = mode });
     errdefer file.close();
     const stat = try file.stat();
 
