@@ -26,6 +26,29 @@ pub const clippy_options: clippy.Options = .{
     .errorFn = writeError,
 };
 
+const AddArguments = clippy.Arguments(
+    &.{
+        .{
+            .arg = "path",
+            .help = "Path to the PDF file to add to the library.",
+            .required = true,
+        },
+        .{
+            .arg = "author",
+            .help = "Authors seperated by `+`, e.g. `Author1+Author2`",
+        },
+        .{
+            .arg = "year",
+            .argtype = i32,
+            .help = "Publication year",
+        },
+        .{
+            .arg = "title",
+            .help = "Title of the paper",
+        },
+    },
+);
+
 const InfoArguments = clippy.Arguments(
     &.{
         .{
@@ -66,6 +89,7 @@ const HelpArguments = clippy.Arguments(&.{
 const FindArguments = clippy.Arguments(&.{});
 
 const Commands = clippy.Commands(union(enum) {
+    add: AddArguments,
     info: InfoArguments,
     list: ListArguments,
     find: FindArguments,
@@ -205,7 +229,7 @@ pub const MetadataMap = struct {
     map: StringMap,
 
     pub fn write(self: *const MetadataMap, writer: anytype) !void {
-        try writer.writeAll("<<\n");
+        try writer.writeAll("\n<<\n");
 
         var itt = self.map.iterator();
         while (itt.next()) |kv| {
@@ -218,7 +242,7 @@ pub const MetadataMap = struct {
             try writer.writeAll("\n");
         }
 
-        try writer.writeAll(">>\n");
+        try writer.writeAll(">>");
     }
 
     pub fn deinit(self: *MetadataMap) void {
@@ -582,6 +606,11 @@ fn listFiles(
 }
 
 const PDFFile = struct {
+    const StartXRef = struct {
+        start_offset: usize,
+        end_offset: usize,
+        location: usize,
+    };
     const XRefTable = struct {
         const XRef = struct {
             offset: usize,
@@ -590,16 +619,13 @@ const PDFFile = struct {
             // true: normal in-use, false: free object
             in_use: bool,
         };
-
-        // byte offset where the startxref entry is
-        startxref_offset: usize,
         // the offsets of the table itself
         start_offset: usize,
         end_offset: usize,
 
         // the start offset and number of entries:  maps the first index to the
         // number of entries
-        headers: std.AutoHashMap(usize, usize),
+        headers: std.AutoArrayHashMap(usize, usize),
         // the entries in the table
         entries: std.AutoArrayHashMap(usize, XRef),
     };
@@ -607,22 +633,30 @@ const PDFFile = struct {
     contents: []const u8,
     allocator: std.mem.Allocator,
     xrefs: std.ArrayList(XRefTable),
+    starts: std.ArrayList(StartXRef),
 
     pub fn init(allocator: std.mem.Allocator, contents: []const u8) PDFFile {
         const xrefs = std.ArrayList(XRefTable).init(allocator);
+        const starts = std.ArrayList(StartXRef).init(allocator);
         return .{
             .contents = contents,
             .allocator = allocator,
             .xrefs = xrefs,
+            .starts = starts,
         };
     }
 
-    fn parseXrefOffset(self: *const PDFFile, start: usize) !usize {
+    fn parseXrefOffset(self: *const PDFFile, start: usize) !StartXRef {
         var itt = PDFTokenizer.init(self.contents[start..]);
         // throw away the 'startxref'
         _ = itt.next();
         // get the byte offset of the xref table
-        return std.fmt.parseInt(usize, itt.next().?, 10);
+        const location = try std.fmt.parseInt(usize, itt.next().?, 10);
+        return .{
+            .start_offset = start,
+            .end_offset = itt.index + start,
+            .location = location,
+        };
     }
 
     pub fn parseXrefTables(self: *PDFFile) !void {
@@ -634,7 +668,8 @@ const PDFFile = struct {
         while (std.mem.lastIndexOf(u8, self.contents[0..end], "startxref")) |start| {
             end = start;
 
-            const offset = try self.parseXrefOffset(start);
+            const startxref = try self.parseXrefOffset(start);
+            const offset = startxref.location;
             if (offset >= self.contents.len) {
                 logger.warn(
                     "startxref offset: {d} is bigger than size of file ({d})",
@@ -651,10 +686,9 @@ const PDFFile = struct {
             }
 
             var table: XRefTable = undefined;
-            table.startxref_offset = start;
             table.start_offset = offset;
 
-            var headers = std.AutoHashMap(usize, usize).init(self.allocator);
+            var headers = std.AutoArrayHashMap(usize, usize).init(self.allocator);
             errdefer headers.deinit();
 
             var entries = std.AutoArrayHashMap(usize, XRefTable.XRef).init(self.allocator);
@@ -698,8 +732,10 @@ const PDFFile = struct {
 
             table.end_offset = table.start_offset + itt.index;
 
+            table.headers = headers;
             table.entries = entries;
             try self.xrefs.append(table);
+            try self.starts.append(startxref);
         }
     }
 
@@ -708,8 +744,191 @@ const PDFFile = struct {
             xref_table.entries.deinit();
         }
         self.xrefs.deinit();
+        self.starts.deinit();
     }
 };
+
+const DiffChunk = struct {
+    offset: usize,
+    old: []const u8,
+    new: []const u8,
+};
+
+const ChunkOrXref = union(enum) {
+    chunk: DiffChunk,
+    xref: PDFFile.XRefTable,
+    startxref: PDFFile.StartXRef,
+
+    fn getOffset(self: ChunkOrXref) usize {
+        return switch (self) {
+            .chunk => |c| c.offset,
+            .xref => |c| c.start_offset,
+            .startxref => |c| c.start_offset,
+        };
+    }
+
+    fn getEndOffset(self: ChunkOrXref) usize {
+        return switch (self) {
+            .chunk => |c| c.old.len + c.offset,
+            .xref => |c| c.end_offset,
+            .startxref => |c| c.end_offset,
+        };
+    }
+
+    pub fn sort_offset(_: void, lhs: ChunkOrXref, rhs: ChunkOrXref) bool {
+        return lhs.getOffset() < rhs.getOffset();
+    }
+};
+
+fn addPaper(state: *State, args: AddArguments.Parsed) !void {
+    var arena = std.heap.ArenaAllocator.init(state.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    try state.loadLibrary();
+
+    const dir = std.fs.cwd();
+    const file = try mmap(dir, args.path);
+    defer file.deinit();
+
+    var pdf = PDFFile.init(alloc, file.ptr);
+    defer pdf.deinit();
+
+    try pdf.parseXrefTables();
+
+    const index = try findMetadataIndex(alloc, file.ptr);
+    var meta = try parseMetadataMap(alloc, file.ptr[index..]);
+    defer meta.deinit();
+
+    try meta.map.put("Author", "Someone+Else 2025");
+    try meta.map.put("Title", "This is a new title");
+
+    // text buffer
+    var buf = std.ArrayList(u8).init(alloc);
+    defer buf.deinit();
+
+    var chunks = std.ArrayList(ChunkOrXref).init(alloc);
+    defer chunks.deinit();
+
+    try meta.write(buf.writer());
+    // append the metadata chunk
+    try chunks.append(
+        .{ .chunk = .{
+            .offset = meta.start_offset + index,
+            .new = try buf.toOwnedSlice(),
+            .old = file.ptr[index + meta.start_offset .. index + meta.end_offset],
+        } },
+    );
+
+    for (pdf.xrefs.items) |xref| {
+        try chunks.append(.{ .xref = xref });
+    }
+
+    for (pdf.starts.items) |s| {
+        try chunks.append(.{ .startxref = s });
+    }
+
+    std.sort.heap(ChunkOrXref, chunks.items, {}, ChunkOrXref.sort_offset);
+
+    // then add the PDF text chunks inbetween
+    const last = chunks.items.len;
+    for (1..last) |i| {
+        const c1 = chunks.items[i - 1];
+        const c2 = chunks.items[i];
+
+        const start = c1.getEndOffset();
+        const end = c2.getOffset();
+
+        const slice = pdf.contents[start..end];
+        try chunks.append(
+            .{ .chunk = .{ .offset = start, .new = slice, .old = slice } },
+        );
+    }
+
+    // TODO: remove this sort and just insert the chunks in the right place
+    std.sort.heap(ChunkOrXref, chunks.items, {}, ChunkOrXref.sort_offset);
+
+    const stat = try file.file.stat();
+    _ = stat;
+
+    const out_file = try std.fs.cwd().createFile("new.pdf", .{});
+
+    const start = index + meta.start_offset;
+    // copy everything before the first item
+    _ = try file.file.copyRangeAll(0, out_file, 0, start);
+    try out_file.seekTo(start);
+
+    const writer = out_file.writer();
+
+    var deltas = std.AutoArrayHashMap(usize, i64).init(alloc);
+    defer deltas.deinit();
+    try deltas.ensureUnusedCapacity(chunks.items.len);
+
+    for (chunks.items) |chunk| {
+        if (chunk.getEndOffset() <= start) continue;
+        switch (chunk) {
+            .chunk => |c| {
+                try writer.writeAll(c.new);
+                const delta = @as(i64, @intCast(c.new.len)) - @as(i64, @intCast(c.old.len));
+                deltas.putAssumeCapacityNoClobber(chunk.getEndOffset(), delta);
+            },
+            .startxref => |c| {
+                var byte_delta: i64 = 0;
+                for (deltas.values()) |v| byte_delta += v;
+                try writer.print(
+                    "startxref\n{d}\n%%EOF",
+                    .{@as(i64, @intCast(c.location)) + byte_delta},
+                );
+            },
+            .xref => |xr| {
+                var ref_buf = std.ArrayList(u8).init(alloc);
+                defer ref_buf.deinit();
+
+                const xrwriter = ref_buf.writer();
+
+                try xrwriter.writeAll("xref\n");
+                var header_itt = xr.headers.iterator();
+
+                while (header_itt.next()) |h| {
+                    const first = h.key_ptr.*;
+                    const length = h.value_ptr.*;
+                    try xrwriter.print("{d} {d}\n", .{ first, length });
+
+                    for (0..length) |i| {
+                        const xref = xr.entries.get(first + i).?;
+                        const offset = xref.offset;
+
+                        var byte_delta: i64 = 0;
+                        for (deltas.keys()) |k| {
+                            if (k <= offset) {
+                                byte_delta += deltas.get(k).?;
+                            }
+                        }
+
+                        try xrwriter.print("{d:0>10} {d:0>5} {c} \n", .{
+                            @as(usize, @intCast(@as(i64, @intCast(offset)) + byte_delta)),
+                            xref.generation,
+                            @as(u8, if (xref.in_use) 'n' else 'f'),
+                        });
+                    }
+                }
+                try xrwriter.writeAll("trailer");
+
+                const xr_slice = ref_buf.items;
+
+                try writer.writeAll(xr_slice);
+
+                const old_len = xr.end_offset - xr.start_offset;
+                const delta = @as(i64, @intCast(xr_slice.len)) - @as(i64, @intCast(old_len));
+
+                std.debug.assert(delta == 0);
+                if (delta > 0) {
+                    deltas.putAssumeCapacityNoClobber(chunk.getEndOffset(), delta);
+                }
+            },
+        }
+    }
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -750,6 +969,9 @@ pub fn main() !void {
         defer state.deinit();
 
         switch (command) {
+            .add => |args| {
+                try addPaper(state, args);
+            },
             .info => |args| {
                 const dir = std.fs.cwd();
                 const p1 = try state.library.loadParsePaper(dir, args.path);
