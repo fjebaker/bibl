@@ -387,7 +387,18 @@ pub const Paper = struct {
     created: u64,
     modified: u64,
 
-    allocator: std.mem.Allocator,
+    /// Create a new paper entry, auto populating default fields
+    pub fn new(authors: []const []const u8, year: u32, title: []const u8) Paper {
+        const now = std.time.milliTimestamp();
+        return .{
+            .authors = authors,
+            .year = year,
+            .title = title,
+            .abspath = "",
+            .created = now,
+            .modified = now,
+        };
+    }
 
     /// Create a canonical file name for this item. Caller owns memory
     pub fn canonicalise(self: *const Paper, allocator: std.mem.Allocator) ![]const u8 {
@@ -424,13 +435,13 @@ pub const Paper = struct {
         }
     }
 
-    fn parseInfo(self: *Paper, info_map: StringMap) !void {
+    fn parseInfo(self: *Paper, allocator: std.mem.Allocator, info_map: StringMap) !void {
         if (info_map.get("Author")) |f| {
-            const author_field = try self.allocator.dupe(u8, f);
+            const author_field = try allocator.dupe(u8, f);
             const split = std.mem.indexOfScalar(u8, author_field, ' ') orelse author_field.len;
 
             const author_string = author_field[0..split];
-            var authors = try self.allocator.alloc(
+            var authors = try allocator.alloc(
                 []const u8,
                 std.mem.count(u8, author_string, "+") + 1,
             );
@@ -452,12 +463,12 @@ pub const Paper = struct {
         }
 
         if (info_map.get("Title")) |f| {
-            const title = try self.allocator.dupe(u8, f);
+            const title = try allocator.dupe(u8, f);
             self.title = title;
         }
         if (info_map.get("Keywords")) |f| {
-            const keywords = try self.allocator.dupe(u8, f);
-            var tags = try self.allocator.alloc(
+            const keywords = try allocator.dupe(u8, f);
+            var tags = try allocator.alloc(
                 []const u8,
                 std.mem.count(u8, keywords, " ") + 1,
             );
@@ -510,13 +521,12 @@ pub const Library = struct {
         defer map.deinit();
 
         var paper: Paper = .{
-            .allocator = allocator,
             .abspath = abspath,
             .modified = @intCast(@divFloor(@abs(stat.mtime), std.time.ns_per_ms)),
             .created = @intCast(@divFloor(@abs(stat.ctime), std.time.ns_per_ms)),
         };
 
-        try paper.parseInfo(map);
+        try paper.parseInfo(allocator, map);
         if (paper.authors.len == 0) return BiblError.NoAuthors;
 
         try self.papers.append(paper);
