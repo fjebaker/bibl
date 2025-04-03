@@ -105,6 +105,26 @@ const SortStrategy = enum {
     modified,
 };
 
+/// Split a list of authors either by spaces or by `+`. Caller owns the memory
+pub fn splitAuthors(allocator: std.mem.Allocator, author_string: []const u8) ![][]const u8 {
+    var authors = try allocator.alloc(
+        []const u8,
+        std.mem.count(u8, author_string, " ") + std.mem.count(u8, author_string, "+") + 1,
+    );
+
+    var itt = std.mem.tokenizeAny(u8, author_string, "+ ");
+    var i: usize = 0;
+    while (itt.next()) |a| : (i += 1) {
+        authors[i] = a;
+    }
+
+    if (i != authors.len) {
+        authors[i] = "et al.";
+        return authors[0 .. i + 1];
+    }
+
+    return authors;
+}
 /// Caller owns the memory
 fn getRootDir(allocator: std.mem.Allocator) ![]const u8 {
     return try std.process.getEnvVarOwned(allocator, "BIBL_LIBRARY");
@@ -440,21 +460,7 @@ pub const Paper = struct {
             const author_field = try allocator.dupe(u8, f);
             const split = std.mem.indexOfScalar(u8, author_field, ' ') orelse author_field.len;
 
-            const author_string = author_field[0..split];
-            var authors = try allocator.alloc(
-                []const u8,
-                std.mem.count(u8, author_string, "+") + 1,
-            );
-
-            var itt = std.mem.tokenizeScalar(u8, author_string, '+');
-            var i: usize = 0;
-            while (itt.next()) |a| : (i += 1) {
-                authors[i] = a;
-            }
-
-            for (authors[i..]) |*a| a.* = "et al.";
-
-            self.authors = authors;
+            self.authors = try splitAuthors(allocator, author_field[0..split]);
 
             const year_string = author_field[split + 1 ..];
             if (year_string.len > 0) {
