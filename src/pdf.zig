@@ -101,6 +101,24 @@ pub fn parseMetadataMap(
     return meta_map;
 }
 
+fn testParseMap(expected_keys: []const []const u8, expected_values: []const []const u8, string: []const u8) !void {
+    var map = try parseMetadataMap(std.testing.allocator, string, 0);
+    defer map.deinit();
+
+    for (expected_keys, map.map.keys(), expected_values, map.map.values()) |exp, acc, exp_v, acc_v| {
+        try std.testing.expectEqualStrings(exp, acc);
+        try std.testing.expectEqualStrings(exp_v, acc_v);
+    }
+}
+
+test "metedata-map" {
+    try testParseMap(
+        &.{ "Time", "Hello" },
+        &.{ "something", "world" },
+        "<</Time something /Hello world>>",
+    );
+}
+
 /// Tokenizer PDF post-script
 pub const PDFTokenizer = struct {
     content: []const u8,
@@ -134,7 +152,7 @@ pub const PDFTokenizer = struct {
                     // skip the next character
                     self.index += 1;
                 },
-                '(', ')' => {
+                '[', ']', '(', ')' => {
                     if (self.index - start == 0) {
                         self.index += 1;
                     }
@@ -142,8 +160,12 @@ pub const PDFTokenizer = struct {
                 },
                 '<', '>' => {
                     const n = self.content[self.index + 1];
-                    if (n == '>' or n == '<') {
-                        self.index += 2;
+                    if (self.index == start) {
+                        if (n == '>' or n == '<') {
+                            self.index += 2;
+                            return self.content[start..self.index];
+                        }
+                    } else {
                         return self.content[start..self.index];
                     }
                 },
@@ -156,6 +178,40 @@ pub const PDFTokenizer = struct {
     }
 };
 
+fn testPDFTokenize(
+    expected: []const []const u8,
+    string: []const u8,
+) !void {
+    var itt = PDFTokenizer.init(string);
+    var list = std.ArrayList([]const u8).init(std.testing.allocator);
+    defer list.deinit();
+
+    while (itt.next()) |token| try list.append(token);
+
+    for (expected, list.items) |e, acc|
+        try std.testing.expectEqualStrings(e, acc);
+}
+
+test "pdf-tokenize" {
+    try testPDFTokenize(
+        &.{ "<<", "/Key", "(", "value", ")", ">>" },
+        "<< /Key (value) >>",
+    );
+    try testPDFTokenize(
+        &.{ "<<", "/Key", "(", "value", "things", ")", ">>" },
+        "<< /Key (value things) >>",
+    );
+    try testPDFTokenize(
+        &.{ "<<", "/Key", "[", "value", "things", "]", ">>" },
+        "<< /Key [value things] >>",
+    );
+    try testPDFTokenize(
+        &.{ "<<", "/Key", "[", "value", "things", "]", ">>" },
+        "<</Key [value things]>>",
+    );
+}
+
+/// Used to apply a new slice of text to the PDF source at a given offset
 const DiffChunk = struct {
     offset: usize,
     old: []const u8,
@@ -214,7 +270,7 @@ pub const PDFFile = struct {
         // the entries in the table
         entries: std.AutoArrayHashMap(usize, XRef),
 
-        /// Write the cross-refernece table to the writer, given a map of byte
+        /// Write the cross-reference table to the writer, given a map of byte
         /// changes at specific offsets.
         pub fn write(
             self: XRefTable,

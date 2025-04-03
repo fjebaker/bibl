@@ -14,6 +14,7 @@ const StringMap = std.StringArrayHashMap([]const u8);
 
 test "main" {
     _ = find;
+    _ = @import("pdf.zig");
 }
 
 const AUTHOR_COLOR = farbe.Farbe.init().fgRgb(193, 156, 0);
