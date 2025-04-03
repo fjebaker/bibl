@@ -90,7 +90,7 @@ pub fn parseMetadataMap(
                         while ((itt.next())) |n| {
                             if (n.len == 1 and n[0] == closing) break;
                         }
-                        break :b itt.content[value_start .. itt.index - 1];
+                        break :b std.mem.trim(u8, itt.content[value_start .. itt.index - 1], " ");
                     } else {
                         switch (p[0]) {
                             '/', '>' => break :b itt.next().?,
@@ -146,7 +146,7 @@ test "metedata-map" {
     );
     try testParseMap(
         &.{ "Size", "ID", "Root", "Prev", "Info" },
-        &.{ "1255", "(text1) (text2) ", "1247 0 R", "1590635", "1248 0 R" },
+        &.{ "1255", "(text1) (text2)", "1247 0 R", "1590635", "1248 0 R" },
         "<</Size 1255 /ID [(text1) (text2) ] /Root 1247 0 R /Prev 1590635 /Info 1248 0 R >>",
     );
 }
