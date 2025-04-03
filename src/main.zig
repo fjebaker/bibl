@@ -303,7 +303,12 @@ pub const PDFTokenizer = struct {
     }
 };
 
-fn parseMetadataMap(allocator: std.mem.Allocator, contents: []const u8) !MetadataMap {
+fn parseMetadataMap(
+    allocator: std.mem.Allocator,
+    all_contents: []const u8,
+    index: usize,
+) !MetadataMap {
+    const contents = all_contents[index..];
     var map = StringMap.init(allocator);
     errdefer map.deinit();
 
@@ -346,8 +351,8 @@ fn parseMetadataMap(allocator: std.mem.Allocator, contents: []const u8) !Metadat
         }
     }
     return .{
-        .start_offset = start_offset,
-        .end_offset = itt.index,
+        .start_offset = start_offset + index,
+        .end_offset = itt.index + index,
         .map = map,
     };
 }
@@ -463,7 +468,7 @@ pub const Library = struct {
         const allocator = self.arena.allocator();
         const index = try findMetadataIndex(allocator, contents);
 
-        var map = (try parseMetadataMap(allocator, contents[index..])).map;
+        var map = (try parseMetadataMap(allocator, contents, index)).map;
         defer map.deinit();
 
         var paper: Paper = .{
@@ -632,6 +637,42 @@ const PDFFile = struct {
         headers: std.AutoArrayHashMap(usize, usize),
         // the entries in the table
         entries: std.AutoArrayHashMap(usize, XRef),
+
+        /// Write the cross-refernece table to the writer, given a map of byte
+        /// changes at specific offsets.
+        pub fn write(
+            self: XRefTable,
+            writer: anytype,
+            deltas: std.AutoArrayHashMap(usize, i64),
+        ) !void {
+            try writer.writeAll("xref\n");
+            var header_itt = self.headers.iterator();
+
+            while (header_itt.next()) |h| {
+                const first = h.key_ptr.*;
+                const length = h.value_ptr.*;
+                try writer.print("{d} {d}\n", .{ first, length });
+
+                for (0..length) |i| {
+                    const xref = self.entries.get(first + i).?;
+                    const offset = xref.offset;
+
+                    var byte_delta: i64 = 0;
+                    for (deltas.keys()) |k| {
+                        if (k <= offset) {
+                            byte_delta += deltas.get(k).?;
+                        }
+                    }
+
+                    try writer.print("{d:0>10} {d:0>5} {c} \n", .{
+                        @as(usize, @intCast(@as(i64, @intCast(offset)) + byte_delta)),
+                        xref.generation,
+                        @as(u8, if (xref.in_use) 'n' else 'f'),
+                    });
+                }
+            }
+            try writer.writeAll("trailer");
+        }
     };
 
     contents: []const u8,
@@ -663,6 +704,7 @@ const PDFFile = struct {
         };
     }
 
+    /// Parse the cross-reference tables
     pub fn parseXrefTables(self: *PDFFile) !void {
         var end: usize = self.contents.len;
 
@@ -743,6 +785,113 @@ const PDFFile = struct {
         }
     }
 
+    pub const PDFWriteOptions = struct {
+        start_index: usize = 0,
+        metadata: ?MetadataMap = null,
+    };
+
+    /// Write the remaining parts of a PDF file, optionally with new metadata.
+    /// The first parts of the PDF should ideally be copied by the filesystem
+    /// or be from a truncated file.
+    pub fn writeRestFile(self: *const PDFFile, writer: anytype, opts: PDFWriteOptions) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        // text buffer for writing temporary strings
+        var buf = std.ArrayList(u8).init(alloc);
+        defer buf.deinit();
+
+        var chunks = std.ArrayList(ChunkOrXref).init(alloc);
+        defer chunks.deinit();
+
+        if (opts.metadata) |meta| {
+            try meta.write(buf.writer());
+            // append the metadata chunk
+            try chunks.append(
+                .{ .chunk = .{
+                    .offset = meta.start_offset,
+                    .new = try buf.toOwnedSlice(),
+                    .old = self.contents[meta.start_offset..meta.end_offset],
+                } },
+            );
+        }
+
+        for (self.xrefs.items) |xref| {
+            try chunks.append(.{ .xref = xref });
+        }
+
+        for (self.starts.items) |s| {
+            try chunks.append(.{ .startxref = s });
+        }
+
+        std.sort.heap(ChunkOrXref, chunks.items, {}, ChunkOrXref.sort_offset);
+
+        // then add the PDF text chunks inbetween
+        const last = chunks.items.len;
+        for (1..last) |i| {
+            const c1 = chunks.items[i - 1];
+            const c2 = chunks.items[i];
+
+            const start = c1.getEndOffset();
+            const end = c2.getOffset();
+
+            const slice = self.contents[start..end];
+            try chunks.append(
+                .{ .chunk = .{ .offset = start, .new = slice, .old = slice } },
+            );
+        }
+
+        // TODO: remove this sort and just insert the chunks in the right place
+        std.sort.heap(ChunkOrXref, chunks.items, {}, ChunkOrXref.sort_offset);
+
+        var deltas = std.AutoArrayHashMap(usize, i64).init(alloc);
+        defer deltas.deinit();
+        try deltas.ensureUnusedCapacity(chunks.items.len);
+
+        const start = if (opts.metadata) |meta|
+            meta.start_offset
+        else
+            opts.start_index;
+
+        for (chunks.items) |chunk| {
+            if (chunk.getEndOffset() <= start) continue;
+            switch (chunk) {
+                .chunk => |c| {
+                    try writer.writeAll(c.new);
+                    const delta = @as(i64, @intCast(c.new.len)) - @as(i64, @intCast(c.old.len));
+                    deltas.putAssumeCapacityNoClobber(chunk.getEndOffset(), delta);
+                },
+                .startxref => |c| {
+                    var byte_delta: i64 = 0;
+                    for (deltas.values()) |v| byte_delta += v;
+                    try writer.print(
+                        "startxref\n{d}\n%%EOF",
+                        .{@as(i64, @intCast(c.location)) + byte_delta},
+                    );
+                },
+                .xref => |xr| {
+                    var ref_buf = std.ArrayList(u8).init(alloc);
+                    defer ref_buf.deinit();
+
+                    try xr.write(ref_buf.writer(), deltas);
+
+                    const xr_slice = ref_buf.items;
+
+                    try writer.writeAll(xr_slice);
+
+                    const old_len = xr.end_offset - xr.start_offset;
+                    const delta = @as(i64, @intCast(xr_slice.len)) - @as(i64, @intCast(old_len));
+
+                    std.debug.assert(delta == 0);
+                    if (delta > 0) {
+                        deltas.putAssumeCapacityNoClobber(chunk.getEndOffset(), delta);
+                    }
+                },
+            }
+        }
+    }
+
     pub fn deinit(self: *PDFFile) void {
         for (self.xrefs.items) |*xref_table| {
             xref_table.entries.deinit();
@@ -801,137 +950,22 @@ fn addPaper(state: *State, args: AddArguments.Parsed) !void {
     try pdf.parseXrefTables();
 
     const index = try findMetadataIndex(alloc, file.ptr);
-    var meta = try parseMetadataMap(alloc, file.ptr[index..]);
+    var meta = try parseMetadataMap(alloc, file.ptr, index);
     defer meta.deinit();
 
-    try meta.map.put("Author", "Someone+Else 2025");
+    try meta.map.put("Author", "Someone+Else 2021");
     try meta.map.put("Title", "This is a new title");
-
-    // text buffer
-    var buf = std.ArrayList(u8).init(alloc);
-    defer buf.deinit();
-
-    var chunks = std.ArrayList(ChunkOrXref).init(alloc);
-    defer chunks.deinit();
-
-    try meta.write(buf.writer());
-    // append the metadata chunk
-    try chunks.append(
-        .{ .chunk = .{
-            .offset = meta.start_offset + index,
-            .new = try buf.toOwnedSlice(),
-            .old = file.ptr[index + meta.start_offset .. index + meta.end_offset],
-        } },
-    );
-
-    for (pdf.xrefs.items) |xref| {
-        try chunks.append(.{ .xref = xref });
-    }
-
-    for (pdf.starts.items) |s| {
-        try chunks.append(.{ .startxref = s });
-    }
-
-    std.sort.heap(ChunkOrXref, chunks.items, {}, ChunkOrXref.sort_offset);
-
-    // then add the PDF text chunks inbetween
-    const last = chunks.items.len;
-    for (1..last) |i| {
-        const c1 = chunks.items[i - 1];
-        const c2 = chunks.items[i];
-
-        const start = c1.getEndOffset();
-        const end = c2.getOffset();
-
-        const slice = pdf.contents[start..end];
-        try chunks.append(
-            .{ .chunk = .{ .offset = start, .new = slice, .old = slice } },
-        );
-    }
-
-    // TODO: remove this sort and just insert the chunks in the right place
-    std.sort.heap(ChunkOrXref, chunks.items, {}, ChunkOrXref.sort_offset);
 
     const stat = try file.file.stat();
     _ = stat;
 
     const out_file = try std.fs.cwd().createFile("new.pdf", .{});
 
-    const start = index + meta.start_offset;
     // copy everything before the first item
-    _ = try file.file.copyRangeAll(0, out_file, 0, start);
-    try out_file.seekTo(start);
+    _ = try file.file.copyRangeAll(0, out_file, 0, meta.start_offset);
+    try out_file.seekTo(meta.start_offset);
 
-    const writer = out_file.writer();
-
-    var deltas = std.AutoArrayHashMap(usize, i64).init(alloc);
-    defer deltas.deinit();
-    try deltas.ensureUnusedCapacity(chunks.items.len);
-
-    for (chunks.items) |chunk| {
-        if (chunk.getEndOffset() <= start) continue;
-        switch (chunk) {
-            .chunk => |c| {
-                try writer.writeAll(c.new);
-                const delta = @as(i64, @intCast(c.new.len)) - @as(i64, @intCast(c.old.len));
-                deltas.putAssumeCapacityNoClobber(chunk.getEndOffset(), delta);
-            },
-            .startxref => |c| {
-                var byte_delta: i64 = 0;
-                for (deltas.values()) |v| byte_delta += v;
-                try writer.print(
-                    "startxref\n{d}\n%%EOF",
-                    .{@as(i64, @intCast(c.location)) + byte_delta},
-                );
-            },
-            .xref => |xr| {
-                var ref_buf = std.ArrayList(u8).init(alloc);
-                defer ref_buf.deinit();
-
-                const xrwriter = ref_buf.writer();
-
-                try xrwriter.writeAll("xref\n");
-                var header_itt = xr.headers.iterator();
-
-                while (header_itt.next()) |h| {
-                    const first = h.key_ptr.*;
-                    const length = h.value_ptr.*;
-                    try xrwriter.print("{d} {d}\n", .{ first, length });
-
-                    for (0..length) |i| {
-                        const xref = xr.entries.get(first + i).?;
-                        const offset = xref.offset;
-
-                        var byte_delta: i64 = 0;
-                        for (deltas.keys()) |k| {
-                            if (k <= offset) {
-                                byte_delta += deltas.get(k).?;
-                            }
-                        }
-
-                        try xrwriter.print("{d:0>10} {d:0>5} {c} \n", .{
-                            @as(usize, @intCast(@as(i64, @intCast(offset)) + byte_delta)),
-                            xref.generation,
-                            @as(u8, if (xref.in_use) 'n' else 'f'),
-                        });
-                    }
-                }
-                try xrwriter.writeAll("trailer");
-
-                const xr_slice = ref_buf.items;
-
-                try writer.writeAll(xr_slice);
-
-                const old_len = xr.end_offset - xr.start_offset;
-                const delta = @as(i64, @intCast(xr_slice.len)) - @as(i64, @intCast(old_len));
-
-                std.debug.assert(delta == 0);
-                if (delta > 0) {
-                    deltas.putAssumeCapacityNoClobber(chunk.getEndOffset(), delta);
-                }
-            },
-        }
-    }
+    try pdf.writeRestFile(out_file.writer(), .{ .metadata = meta });
 }
 
 pub fn main() !void {
