@@ -1,13 +1,18 @@
 const std = @import("std");
-const StringMap = std.StringArrayHashMap([]const u8);
 const logger = std.log.scoped(.pdf);
 
 pub const PDFError = error{ OffsetTooBig, MissingXRef };
+pub const MapItemKind = enum { string, list, literal };
 
 pub const MetadataMap = struct {
+    pub const MapItem = struct {
+        text: []const u8,
+        kind: MapItemKind = .literal,
+    };
+    pub const MapInternal = std.StringArrayHashMap(MapItem);
     start_offset: usize,
     end_offset: usize,
-    map: StringMap,
+    map: MapInternal,
     arena: std.heap.ArenaAllocator,
 
     pub fn init(allocator: std.mem.Allocator) MetadataMap {
@@ -15,7 +20,7 @@ pub const MetadataMap = struct {
         return .{
             .start_offset = 0,
             .end_offset = 0,
-            .map = StringMap.init(allocator),
+            .map = MapInternal.init(allocator),
             .arena = arena,
         };
     }
@@ -26,10 +31,10 @@ pub const MetadataMap = struct {
         var itt = self.map.iterator();
         while (itt.next()) |kv| {
             try writer.print("/{s} ", .{kv.key_ptr.*});
-            if (kv.value_ptr.*.len > 0 and kv.value_ptr.*[0] == '/') {
-                try writer.writeAll(kv.value_ptr.*);
-            } else {
-                try writer.print("({s})", .{kv.value_ptr.*});
+            switch (kv.value_ptr.kind) {
+                .string => try writer.print("({s})", .{kv.value_ptr.text}),
+                .list => try writer.print("[{s}]", .{kv.value_ptr.text}),
+                .literal => try writer.writeAll(kv.value_ptr.text),
             }
             try writer.writeAll("\n");
         }
@@ -37,9 +42,12 @@ pub const MetadataMap = struct {
         try writer.writeAll(">>");
     }
 
-    pub fn put(self: *MetadataMap, key: []const u8, value: []const u8) !void {
+    pub fn put(self: *MetadataMap, key: []const u8, value: MapItem) !void {
         const alloc = self.arena.allocator();
-        try self.map.put(try alloc.dupe(u8, key), try alloc.dupe(u8, value));
+        const dupe_value = try alloc.dupe(u8, value.text);
+        var store = value;
+        store.text = dupe_value;
+        try self.map.put(try alloc.dupe(u8, key), store);
     }
 
     pub fn deinit(self: *MetadataMap) void {
@@ -69,7 +77,9 @@ pub fn parseMetadataMap(
     errdefer meta_map.deinit();
     meta_map.start_offset = itt.index + index;
 
+    var kind: MapItemKind = .literal;
     while (itt.next()) |token| {
+        kind = .literal;
         if (token.len > 1 and std.mem.eql(u8, token, ">>")) {
             // map end
             break;
@@ -80,6 +90,11 @@ pub fn parseMetadataMap(
                 if (itt.peek()) |p| {
                     // eat the opening brackets
                     if (p[0] == '(' or p[0] == '[') {
+                        if (p[0] == '(') {
+                            kind = .string;
+                        } else {
+                            kind = .list;
+                        }
                         const closing: u8 = switch (p[0]) {
                             '(' => ')',
                             '[' => ']',
@@ -111,7 +126,7 @@ pub fn parseMetadataMap(
                 unreachable;
             };
 
-            try meta_map.put(token[1..], value);
+            try meta_map.put(token[1..], .{ .text = value, .kind = kind });
         }
     }
 
@@ -263,12 +278,18 @@ const ChunkOrXref = union(enum) {
     chunk: DiffChunk,
     xref: PDFFile.XRefTable,
     startxref: PDFFile.StartXRef,
+    trailer: struct {
+        index: usize,
+        start_offset: usize,
+        end_offset: usize,
+    },
 
     fn getOffset(self: ChunkOrXref) usize {
         return switch (self) {
             .chunk => |c| c.offset,
             .xref => |c| c.start_offset,
             .startxref => |c| c.start_offset,
+            .trailer => |c| c.start_offset,
         };
     }
 
@@ -277,6 +298,7 @@ const ChunkOrXref = union(enum) {
             .chunk => |c| c.old.len + c.offset,
             .xref => |c| c.end_offset,
             .startxref => |c| c.end_offset,
+            .trailer => |c| c.end_offset,
         };
     }
 
@@ -352,15 +374,18 @@ pub const PDFFile = struct {
     allocator: std.mem.Allocator,
     xrefs: std.ArrayList(XRefTable),
     starts: std.ArrayList(StartXRef),
+    trailers: std.ArrayList(MetadataMap),
 
     pub fn init(allocator: std.mem.Allocator, contents: []const u8) PDFFile {
         const xrefs = std.ArrayList(XRefTable).init(allocator);
         const starts = std.ArrayList(StartXRef).init(allocator);
+        const trailers = std.ArrayList(MetadataMap).init(allocator);
         return .{
             .contents = contents,
             .allocator = allocator,
             .xrefs = xrefs,
             .starts = starts,
+            .trailers = trailers,
         };
     }
 
@@ -418,7 +443,15 @@ pub const PDFFile = struct {
 
             var i: usize = 0;
             while (itt.next()) |token| {
-                if (std.mem.eql(u8, token, "trailer")) break;
+                if (std.mem.eql(u8, token, "trailer")) {
+                    // there could be some additional maps after the trailer that encode /Prev entries
+                    var map = try parseMetadataMap(self.allocator, self.contents, itt.index + offset);
+                    errdefer map.deinit();
+                    if (map.map.get("Prev")) |_| {
+                        try self.trailers.append(map);
+                    }
+                    break;
+                }
                 const v1 = try std.fmt.parseInt(usize, token, 10);
                 const v2 = try std.fmt.parseInt(usize, itt.next().?, 10);
                 const v3 = itt.peek().?;
@@ -498,6 +531,14 @@ pub const PDFFile = struct {
             try chunks.append(.{ .startxref = s });
         }
 
+        for (0.., self.trailers.items) |i, t| {
+            try chunks.append(.{ .trailer = .{
+                .index = i,
+                .start_offset = t.start_offset,
+                .end_offset = t.end_offset,
+            } });
+        }
+
         std.sort.heap(ChunkOrXref, chunks.items, {}, ChunkOrXref.sort_offset);
 
         // then add the PDF text chunks inbetween
@@ -527,13 +568,41 @@ pub const PDFFile = struct {
         else
             opts.start_index;
 
+        var previous_startxref: ?usize = null;
         for (chunks.items) |chunk| {
-            if (chunk.getEndOffset() <= start) continue;
+            if (chunk.getEndOffset() <= start) {
+                switch (chunk) {
+                    .startxref => |c| {
+                        previous_startxref = c.location;
+                    },
+                    else => {},
+                }
+                continue;
+            }
             switch (chunk) {
                 .chunk => |c| {
                     try writer.writeAll(c.new);
                     const delta = @as(i64, @intCast(c.new.len)) - @as(i64, @intCast(c.old.len));
-                    deltas.putAssumeCapacityNoClobber(chunk.getEndOffset(), delta);
+                    if (delta != 0) {
+                        deltas.putAssumeCapacityNoClobber(chunk.getEndOffset(), delta);
+                    }
+                },
+                .trailer => |trail| {
+                    var ref_buf = std.ArrayList(u8).init(alloc);
+                    defer ref_buf.deinit();
+
+                    const t = &self.trailers.items[trail.index];
+                    try t.put("Prev", .{ .text = try std.fmt.allocPrint(alloc, "{d}", .{previous_startxref.?}) });
+                    try t.write(ref_buf.writer());
+
+                    try writer.writeAll(ref_buf.items);
+
+                    const old_len = trail.end_offset - trail.start_offset;
+                    const delta = @as(i64, @intCast(ref_buf.items.len)) - @as(i64, @intCast(old_len));
+
+                    if (delta != 0) {
+                        deltas.putAssumeCapacityNoClobber(chunk.getEndOffset(), delta);
+                    }
                 },
                 .startxref => |c| {
                     var ref_buf = std.ArrayList(u8).init(alloc);
@@ -548,10 +617,13 @@ pub const PDFFile = struct {
                         if (offset <= c.location) byte_delta += delta;
                     }
 
+                    const offset: usize = @intCast(@as(i64, @intCast(c.location)) + byte_delta);
                     try ref_buf.writer().print(
                         "startxref\n{d}\n%%EOF",
-                        .{@as(i64, @intCast(c.location)) + byte_delta},
+                        .{offset},
                     );
+
+                    previous_startxref = offset;
 
                     try writer.writeAll(ref_buf.items);
 
@@ -589,6 +661,10 @@ pub const PDFFile = struct {
             xref_table.headers.deinit();
         }
         self.xrefs.deinit();
+        for (self.trailers.items) |*trailer| {
+            trailer.deinit();
+        }
+        self.trailers.deinit();
         self.starts.deinit();
     }
 };

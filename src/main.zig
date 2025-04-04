@@ -343,15 +343,15 @@ pub const Paper = struct {
         const tag_list = try std.mem.join(allocator, " ", self.tags);
         defer allocator.free(tag_list);
 
-        try meta.put("Author", author_list);
-        try meta.put("PubDate", year);
-        try meta.put("Title", self.title);
-        try meta.put("Keywords", tag_list);
+        try meta.put("Author", .{ .text = author_list, .kind = .string });
+        try meta.put("PubDate", .{ .text = year, .kind = .string });
+        try meta.put("Title", .{ .text = self.title, .kind = .string });
+        try meta.put("Keywords", .{ .text = tag_list, .kind = .string });
     }
 
-    fn parseInfo(self: *Paper, allocator: std.mem.Allocator, info_map: StringMap) !void {
-        if (info_map.get("Author")) |f| {
-            const author_field = try allocator.dupe(u8, f);
+    fn parseInfo(self: *Paper, allocator: std.mem.Allocator, info_map: MetadataMap.MapInternal) !void {
+        if (info_map.get("Author")) |author| {
+            const author_field = author.text;
             const split = std.mem.indexOfScalar(u8, author_field, ' ') orelse author_field.len;
 
             self.authors = try splitAuthors(allocator, author_field[0..split]);
@@ -362,18 +362,16 @@ pub const Paper = struct {
             }
         }
 
-        if (info_map.get("Title")) |f| {
-            const title = try allocator.dupe(u8, f);
-            self.title = title;
+        if (info_map.get("Title")) |title| {
+            self.title = title.text;
         }
-        if (info_map.get("Keywords")) |f| {
-            const keywords = try allocator.dupe(u8, f);
+        if (info_map.get("Keywords")) |keywords| {
             var tags = try allocator.alloc(
                 []const u8,
-                std.mem.count(u8, keywords, " ") + 1,
+                std.mem.count(u8, keywords.text, " ") + 1,
             );
 
-            var itt = std.mem.tokenizeScalar(u8, keywords, ' ');
+            var itt = std.mem.tokenizeScalar(u8, keywords.text, ' ');
             var i: usize = 0;
             while (itt.next()) |t| : (i += 1) {
                 tags[i] = t;
@@ -582,8 +580,8 @@ fn addPaper(state: *State, args: AddArguments.Parsed) !void {
     var meta = try parseMetadataMap(alloc, file.ptr, index);
     defer meta.deinit();
 
-    try meta.map.put("Author", "Someone+Else 2021");
-    try meta.map.put("Title", "This is a new title");
+    try meta.map.put("Author", .{ .text = "Someone+Else 2021", .kind = .string });
+    try meta.map.put("Title", .{ .text = "This is a new title", .kind = .string });
 
     const stat = try file.file.stat();
     _ = stat;
