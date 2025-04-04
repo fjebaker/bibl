@@ -717,22 +717,30 @@ pub fn main() !void {
                 try state.loadLibrary();
                 const papers = state.library.papers.items;
                 for (papers) |paper| {
-                    std.debug.print("   {s} ->", .{std.fs.path.basename(paper.abspath)});
-                    // const filename = try paper.canonicalise(alloc);
-                    const filename = std.fs.path.basename(paper.abspath);
-                    // try state.dir.rename(std.fs.path.basename(paper.abspath), filename);
+                    _ = paper;
+                    _ = alloc;
+                    // if (std.mem.containsAtLeast(u8, paper.abspath, 1, "Uttley_Malzac")) {
+                    //     std.debug.print("   {s} ->", .{std.fs.path.basename(paper.abspath)});
+                    //     const filename = std.fs.path.basename(paper.abspath);
 
-                    const file = try mmapWrite(state.dir, filename);
-                    defer file.deinit();
+                    //     const file = try mmapWrite(state.dir, filename);
+                    //     defer file.deinit();
 
-                    const index = try findMetadataIndex(allocator, file.ptr);
-                    var meta = try parseMetadataMap(allocator, file.ptr, index);
-                    defer meta.deinit();
+                    //     const index = try findMetadataIndex(allocator, file.ptr);
+                    //     var meta = try parseMetadataMap(allocator, file.ptr, index);
+                    //     defer meta.deinit();
 
-                    try paper.insertInto(alloc, &meta);
+                    //     paper.authors = &.{ "Uttley", "Malzac" };
+                    //     paper.year = 2025;
 
-                    try writeUpdateMetadata(allocator, file, meta);
-                    std.debug.print(" Done\n", .{});
+                    //     try paper.insertInto(alloc, &meta);
+
+                    //     try writeUpdateMetadata(allocator, file, meta);
+
+                    //     const new_filename = try paper.canonicalise(alloc);
+                    //     try state.dir.rename(std.fs.path.basename(paper.abspath), new_filename);
+                    //     std.debug.print(" Done\n", .{});
+                    // }
                 }
             },
         }
