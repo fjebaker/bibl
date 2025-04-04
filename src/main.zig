@@ -25,7 +25,12 @@ const USAGE =
     \\bibl: a command line bibliography and library manager
 ;
 
-const BiblError = error{ NoTrailer, NoMetadataFound, NoAuthors };
+const BiblError = error{
+    NoTrailer,
+    NoMetadataFound,
+    NoAuthors,
+    DuplicatePaper,
+};
 
 pub const clippy_options: clippy.Options = .{
     .errorFn = writeError,
@@ -39,17 +44,20 @@ const AddArguments = clippy.Arguments(
             .required = true,
         },
         .{
-            .arg = "author",
+            .arg = "-a/--author author",
             .help = "Authors seperated by `+`, e.g. `Author1+Author2`",
+            .required = true,
         },
         .{
-            .arg = "year",
-            .argtype = i32,
+            .arg = "-y/--year year",
+            .argtype = u32,
             .help = "Publication year",
+            .required = true,
         },
         .{
-            .arg = "title",
+            .arg = "-t/--title title",
             .help = "Title of the paper",
+            .required = true,
         },
     },
 );
@@ -304,9 +312,20 @@ pub const Paper = struct {
             .year = year,
             .title = title,
             .abspath = "",
-            .created = now,
-            .modified = now,
+            .tags = &.{"unread"},
+            .created = @intCast(now),
+            .modified = @intCast(now),
         };
+    }
+
+    /// Equality comparison based on authors and year. Ignores title.
+    pub fn eql(lhs: Paper, rhs: Paper) bool {
+        if (lhs.authors.len != rhs.authors.len) return false;
+        if (lhs.year != rhs.year) return false;
+        for (lhs.authors, rhs.authors) |a1, a2| {
+            if (!std.ascii.eqlIgnoreCase(a1, a2)) return false;
+        }
+        return true;
     }
 
     /// Create a canonical file name for this item. Caller owns memory
@@ -577,6 +596,15 @@ fn addPaper(state: *State, args: AddArguments.Parsed) !void {
 
     try state.loadLibrary();
 
+    const authors = try splitAuthors(alloc, args.author, .{});
+    var paper = Paper.new(authors, args.year, args.title);
+
+    for (state.library.papers.items) |p| {
+        if (paper.eql(p)) {
+            return BiblError.DuplicatePaper;
+        }
+    }
+
     const dir = std.fs.cwd();
     const file = try mmap(dir, args.path);
     defer file.deinit();
@@ -590,19 +618,18 @@ fn addPaper(state: *State, args: AddArguments.Parsed) !void {
     var meta = try parseMetadataMap(alloc, file.ptr, index);
     defer meta.deinit();
 
-    try meta.map.put("Author", .{ .text = "Someone+Else 2021", .kind = .string });
-    try meta.map.put("Title", .{ .text = "This is a new title", .kind = .string });
+    try paper.insertInto(alloc, &meta);
 
-    const stat = try file.file.stat();
-    _ = stat;
-
-    const out_file = try std.fs.cwd().createFile("new.pdf", .{});
+    const canonical_name = try paper.canonicalise(alloc);
+    const out_file = try state.dir.createFile(canonical_name, .{});
 
     // copy everything before the first item
     _ = try file.file.copyRangeAll(0, out_file, 0, meta.start_offset);
     try out_file.seekTo(meta.start_offset);
-
+    // write the updated metadata
     try pdf.writeRestFile(out_file.writer(), .{ .metadata = meta });
+
+    try std.io.getStdOut().writer().print("Added {s} to library\n", .{canonical_name});
 }
 
 fn writeUpdateMetadata(
