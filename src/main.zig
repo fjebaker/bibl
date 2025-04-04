@@ -110,22 +110,34 @@ const SortStrategy = enum {
     modified,
 };
 
+pub const SplitOptions = struct {
+    split_spaces: bool = false,
+};
+
 /// Split a list of authors either by spaces or by `+`. Caller owns the memory
-pub fn splitAuthors(allocator: std.mem.Allocator, author_string: []const u8) ![][]const u8 {
+pub fn splitAuthors(allocator: std.mem.Allocator, author_string: []const u8, opts: SplitOptions) ![][]const u8 {
     var authors = try allocator.alloc(
         []const u8,
         std.mem.count(u8, author_string, " ") + std.mem.count(u8, author_string, "+") + 1,
     );
 
-    var itt = std.mem.tokenizeAny(u8, author_string, "+ ");
+    var itt = std.mem.tokenizeAny(u8, author_string, if (opts.split_spaces) "+ " else "+");
     var i: usize = 0;
+
+    var has_et_al: bool = false;
     while (itt.next()) |a| : (i += 1) {
+        if (std.mem.eql(u8, a, "et al.")) {
+            has_et_al = true;
+        }
         authors[i] = a;
     }
 
     if (i != authors.len) {
-        authors[i] = "et al.";
-        return authors[0 .. i + 1];
+        if (!has_et_al) {
+            authors[i] = "et al.";
+            i += 1;
+        }
+        return authors[0..i];
     }
 
     return authors;
@@ -351,7 +363,7 @@ pub const Paper = struct {
 
     fn parseInfo(self: *Paper, allocator: std.mem.Allocator, info_map: MetadataMap.MapInternal) !void {
         if (info_map.get("Author")) |author| {
-            self.authors = try splitAuthors(allocator, author.text);
+            self.authors = try splitAuthors(allocator, author.text, .{});
         }
 
         if (info_map.get("PubDate")) |pubdate| {
