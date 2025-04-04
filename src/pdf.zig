@@ -445,10 +445,17 @@ pub const PDFFile = struct {
             while (itt.next()) |token| {
                 if (std.mem.eql(u8, token, "trailer")) {
                     // there could be some additional maps after the trailer that encode /Prev entries
-                    var map = try parseMetadataMap(self.allocator, self.contents, itt.index + offset);
+                    var map = try parseMetadataMap(
+                        self.allocator,
+                        self.contents,
+                        itt.index + offset,
+                    );
                     errdefer map.deinit();
                     if (map.map.get("Prev")) |_| {
                         try self.trailers.append(map);
+                    } else {
+                        // free as we will not be using this map
+                        map.deinit();
                     }
                     break;
                 }
@@ -655,15 +662,24 @@ pub const PDFFile = struct {
         }
     }
 
-    pub fn deinit(self: *PDFFile) void {
+    /// Clear the cross reference tables and trailers, deallocating associated
+    /// memory.
+    pub fn clearXrefs(self: *PDFFile) void {
         for (self.xrefs.items) |*xref_table| {
             xref_table.entries.deinit();
             xref_table.headers.deinit();
         }
-        self.xrefs.deinit();
         for (self.trailers.items) |*trailer| {
             trailer.deinit();
         }
+
+        self.xrefs.clearRetainingCapacity();
+        self.trailers.clearRetainingCapacity();
+    }
+
+    pub fn deinit(self: *PDFFile) void {
+        self.clearXrefs();
+        self.xrefs.deinit();
         self.trailers.deinit();
         self.starts.deinit();
     }

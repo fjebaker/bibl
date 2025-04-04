@@ -351,24 +351,22 @@ pub const Paper = struct {
 
     fn parseInfo(self: *Paper, allocator: std.mem.Allocator, info_map: MetadataMap.MapInternal) !void {
         if (info_map.get("Author")) |author| {
-            const author_field = author.text;
-            const split = std.mem.indexOfScalar(u8, author_field, ' ') orelse author_field.len;
+            self.authors = try splitAuthors(allocator, author.text);
+        }
 
-            self.authors = try splitAuthors(allocator, author_field[0..split]);
-
-            const year_string = author_field[split + 1 ..];
-            if (year_string.len > 0) {
-                self.year = try std.fmt.parseInt(u32, year_string, 10);
-            }
+        if (info_map.get("PubDate")) |pubdate| {
+            self.year = try std.fmt.parseInt(u32, pubdate.text, 10);
         }
 
         if (info_map.get("Title")) |title| {
             self.title = title.text;
         }
+
         if (info_map.get("Keywords")) |keywords| {
+            const num_tags = if (keywords.text.len == 0) 0 else std.mem.count(u8, keywords.text, " ") + 1;
             var tags = try allocator.alloc(
                 []const u8,
-                std.mem.count(u8, keywords.text, " ") + 1,
+                num_tags,
             );
 
             var itt = std.mem.tokenizeScalar(u8, keywords.text, ' ');
@@ -610,11 +608,7 @@ fn writeUpdateMetadata(
         switch (err) {
             PDFError.MissingXRef => {
                 std.debug.print("MISSING OFFSET: assuming we can just continue...\n", .{});
-                for (pdf.xrefs.items) |*xref_table| {
-                    xref_table.entries.deinit();
-                    xref_table.headers.deinit();
-                }
-                pdf.xrefs.clearAndFree();
+                pdf.clearXrefs();
             },
             else => return err,
         }
