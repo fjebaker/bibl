@@ -59,6 +59,10 @@ const AddArguments = clippy.Arguments(
             .help = "Title of the paper",
             .required = true,
         },
+        .{
+            .arg = "--copy",
+            .help = "Create a copy of the original file instead of moving it",
+        },
     },
 );
 
@@ -629,7 +633,12 @@ fn addPaper(state: *State, args: AddArguments.Parsed) !void {
     // write the updated metadata
     try pdf.writeRestFile(out_file.writer(), .{ .metadata = meta });
 
-    try std.io.getStdOut().writer().print("Added {s} to library\n", .{canonical_name});
+    if (args.copy) {
+        try std.io.getStdOut().writer().print("Copied {s} to library\n", .{canonical_name});
+    } else {
+        try std.fs.cwd().deleteFile(args.path);
+        try std.io.getStdOut().writer().print("Moved {s} to library\n", .{canonical_name});
+    }
 }
 
 fn writeUpdateMetadata(
