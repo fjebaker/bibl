@@ -144,7 +144,7 @@ fn testParseMap(expected_keys: []const []const u8, expected_values: []const []co
         const acc = map.map.keys()[i];
         const acc_v = map.map.values()[i];
         try std.testing.expectEqualStrings(exp, acc);
-        try std.testing.expectEqualStrings(exp_v, acc_v);
+        try std.testing.expectEqualStrings(exp_v, acc_v.text);
     }
 }
 
@@ -158,6 +158,11 @@ test "metedata-map" {
         &.{ "Time", "Hello" },
         &.{ "something", "hello world" },
         "<</Time something /Hello (hello world)>>",
+    );
+    try testParseMap(
+        &.{ "Time", "Hello" },
+        &.{ "/False", "hello world" },
+        "<</Time/False/Hello (hello world)>>",
     );
     try testParseMap(
         &.{ "Size", "ID", "Root", "Prev", "Info" },
@@ -186,7 +191,19 @@ pub const PDFTokenizer = struct {
     /// Obtain the next element or null.
     pub fn next(self: *PDFTokenizer) ?[]const u8 {
         var start = self.index;
+        var literal: ?usize = null;
         while (self.index < self.content.len) {
+            if (literal) |l_start| {
+                switch (self.content[self.index]) {
+                    'a'...'z', 'A'...'Z' => {
+                        self.index += 1;
+                        continue;
+                    },
+                    else => {
+                        return self.content[l_start..self.index];
+                    },
+                }
+            }
             switch (self.content[self.index]) {
                 ' ', '\r', '\n' => {
                     if (self.index - start > 0) {
@@ -194,6 +211,9 @@ pub const PDFTokenizer = struct {
                     } else {
                         start = self.index + 1;
                     }
+                },
+                '/' => {
+                    literal = self.index;
                 },
                 '\\' => {
                     // skip the next character
@@ -255,6 +275,10 @@ test "pdf-tokenize" {
     try testPDFTokenize(
         &.{ "<<", "/Key", "[", "value", "things", "]", ">>" },
         "<</Key [value things]>>",
+    );
+    try testPDFTokenize(
+        &.{ "<<", "/Key", "/False", ">>" },
+        "<</Key/False>>",
     );
     try testPDFTokenize(
         &.{
